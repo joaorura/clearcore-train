@@ -22,7 +22,8 @@ def test_phase_order_and_contents_are_fixed():
         "1-noise-rir-encoder", "2-vctk", "3-librispeech-100-test-clean", "4-cml-tts-pt", "5-cv27-pt"]
     by_phase = {p["id"]: [s["id"] for s in p["sources"]] for p in cfg["phases"]}
     assert by_phase["1-noise-rir-encoder"] == [
-        "dns-noise-fullband-cc0", "fsd50k-eval-cc0-ccby", "rir-synthetic-v2", "speechbrain-ecapa-voxceleb"]
+        "dns-noise-fullband-cc0", "fsd50k-eval-cc0-ccby", "rir-synthetic-v2", "speechbrain-ecapa-voxceleb",
+        "wespeaker-resnet34"]
     assert by_phase["2-vctk"] == ["vctk-0.92-mic1"]
     assert by_phase["3-librispeech-100-test-clean"] == ["librispeech-train-clean-100", "librispeech-test-clean"]
     assert by_phase["4-cml-tts-pt"] == ["cml-tts-pt-cap30h"]
@@ -41,7 +42,7 @@ def test_owner_exclusions_are_not_scheduled_but_are_recorded():
 def test_phase_sizes_follow_measured_factors():
     phases = {p.id: p for p in plan_phases(FREE_62, 10.0)}
     assert all(isinstance(p, Phase) for p in phases.values())
-    p1 = 10.0 * F_NOISE48 + 15.0 * F_FSD441 + 1.05 + 0.08
+    p1 = 10.0 * F_NOISE48 + 15.0 * F_FSD441 + 0.664 + 0.08 + 0.1
     assert phases["1-noise-rir-encoder"].gb_final == pytest.approx(p1, rel=1e-9)
     assert phases["2-vctk"].gb_final == pytest.approx(44.0 * F_VCTK, rel=1e-9)
     assert phases["3-librispeech-100-test-clean"].gb_final == pytest.approx((100.6 + 5.4) * F_LIBRI, rel=1e-9)
@@ -85,6 +86,36 @@ def test_peak_that_does_not_fit_blocks_even_if_final_fits(tmp_path: Path):
     (p,) = plan_phases(30 * GB, 10.0, config=path)  # final: 20 - 1 = 19 >= 0; pico: 20 - 31 < 0
     assert p.cumulative_margin_gb == pytest.approx(19.0) and p.status == "blocked_disk"
     assert p.peak_margin_gb == pytest.approx(-11.0)
+
+
+def _cfg_with(tmp_path: Path, mutate) -> Path:
+    cfg = yaml.safe_load(disk_plan.PHASES_V1.read_text())
+    mutate(cfg)
+    path = tmp_path / "cfg.yaml"
+    path.write_text(yaml.safe_dump(cfg))
+    return path
+
+
+def test_missing_baseline_or_ids_and_duplicate_source_are_plan_errors(tmp_path: Path):
+    cases = {
+        "baseline ausente": lambda c: c.pop("baseline"),
+        "baseline sem id": lambda c: c["baseline"][0].pop("id"),
+        "baseline sem gb": lambda c: c["baseline"][0].pop("gb"),
+        "baseline gb negativo": lambda c: c["baseline"][0].update(gb=-1.0),
+        "fase sem id": lambda c: c["phases"][0].pop("id"),
+        "fonte sem id": lambda c: c["phases"][0]["sources"][0].pop("id"),
+        "id de fase repetido": lambda c: c["phases"][1].update(id=c["phases"][0]["id"]),
+        "fonte duplicada": lambda c: c["phases"][1]["sources"].append(dict(c["phases"][0]["sources"][0])),
+    }
+    for name, mutate in cases.items():
+        with pytest.raises(PlanError):
+            plan_phases(FREE_62, 10.0, config=_cfg_with(tmp_path, mutate))
+        assert name
+
+
+def test_phase_requires_peak_margin():
+    with pytest.raises(TypeError):
+        Phase("x", ("a",), 1.0, 1.0, 1.0)  # peak_margin_gb e status são obrigatórios
 
 
 def test_inputs_are_validated(tmp_path: Path):

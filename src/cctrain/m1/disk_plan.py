@@ -39,8 +39,8 @@ class Phase:
     gb_final: float
     gb_peak: float
     cumulative_margin_gb: float
-    peak_margin_gb: float = math.nan
-    status: str = "ok"  # "ok" | "blocked_disk"
+    peak_margin_gb: float
+    status: str  # "ok" | "blocked_disk"
 
 
 def _source_gb(src: Mapping) -> float:
@@ -69,19 +69,43 @@ def load_phases_config(path: Path = PHASES_V1) -> dict:
     unknown = set(cfg) - _TOP_KEYS
     if unknown:
         raise PlanError(f"m1-phases: chaves desconhecidas {sorted(unknown)}")
-    ids = [p["id"] for p in cfg.get("phases") or []]
-    if not ids or len(set(ids)) != len(ids):
-        raise PlanError("m1-phases: fases ausentes ou com id repetido")
-    for p in cfg["phases"]:
+    baseline = cfg.get("baseline")
+    if not isinstance(baseline, list):
+        raise PlanError("m1-phases: baseline ausente (lista, possivelmente vazia)")
+    for b in baseline:
+        if not isinstance(b, dict) or not b.get("id") or "gb" not in b:
+            raise PlanError(f"baseline: cada item precisa de id e gb, recebido {b!r}")
+        try:
+            gb = float(b["gb"])
+        except (TypeError, ValueError):
+            raise PlanError(f"baseline {b['id']!r}: gb inválido") from None
+        if not (math.isfinite(gb) and gb >= 0):
+            raise PlanError(f"baseline {b['id']!r}: gb inválido")
+    phases = cfg.get("phases")
+    if not isinstance(phases, list) or not phases:
+        raise PlanError("m1-phases: fases ausentes")
+    for p in phases:
+        if not isinstance(p, dict) or not p.get("id"):
+            raise PlanError(f"fase sem id: {p!r}")
+    ids = [p["id"] for p in phases]
+    if len(set(ids)) != len(ids):
+        raise PlanError("m1-phases: id de fase repetido")
+    seen: set[str] = set()
+    for p in phases:
         if not p.get("sources"):
             raise PlanError(f"fase {p['id']}: sem fontes")
         for s in p["sources"]:
+            if not isinstance(s, dict) or not s.get("id"):
+                raise PlanError(f"fase {p['id']}: fonte sem id: {s!r}")
+            if s["id"] in seen:
+                raise PlanError(f"fonte {s['id']!r} duplicada")
+            seen.add(s["id"])
             _source_gb(s)  # valida
     return cfg
 
 
 def _baseline_gb(cfg: Mapping) -> float:
-    return sum(float(b["gb"]) for b in cfg.get("baseline") or [])
+    return sum(float(b["gb"]) for b in cfg["baseline"])
 
 
 def _check_inputs(free_bytes: float, reserve_gb: float) -> None:
