@@ -123,6 +123,7 @@ class StatefulOrtFrameModel:
         opts = ort.SessionOptions()
         opts.intra_op_num_threads = 1
         opts.inter_op_num_threads = 1
+        opts.log_severity_level = 3
         self._sessions = {g: ort.InferenceSession(str(model_dir / f"{g}.onnx"), opts,
                                                   providers=["CPUExecutionProvider"])
                           for g in ("enc", "erb_dec", "df_dec")}
@@ -212,11 +213,11 @@ def run_replica(audio: np.ndarray, model: FrameModel, thresholds=DEFAULT_THRESHO
 def tract_gating(asset: Path, audio: np.ndarray, out_prefix: Path, film: np.ndarray | None = None) -> ReplicaResult:
     out_prefix = Path(out_prefix)
     out_prefix.parent.mkdir(parents=True, exist_ok=True)
-    inp = out_prefix.with_suffix(".in.f32")
+    inp = Path(f"{out_prefix}.in.f32")
     np.asarray(audio, "<f4").tofile(inp)
     args = ["gating", asset, inp, out_prefix]
     if film is not None:
-        film_path = out_prefix.with_suffix(".film.f32")
+        film_path = Path(f"{out_prefix}.film.f32")
         np.asarray(film, "<f4").tofile(film_path)
         args.append(film_path)
     proc = tractcheck.run(*args)
@@ -252,7 +253,16 @@ def stage_fractions(stages: np.ndarray) -> dict[str, float]:
     return {st.name.lower(): float(np.mean(s == int(st))) for st in Stage}
 
 
-def parity_mixture(data_root: Path, frames: int = 1000, snr_db: float = 5.0, silent_frames: int = 20) -> np.ndarray:
+PARITY_SNR_SCHEDULE_DB = (40.0, 25.0, 10.0, 5.0, -5.0)
+PARITY_SILENT_RANGES = ((0, 20), (500, 520))
+
+
+def parity_mixture(data_root: Path, frames: int = 1000, snr_schedule_db: Sequence[float] = PARITY_SNR_SCHEDULE_DB,
+                   block_frames: int = 200, silent_ranges: Sequence[tuple[int, int]] = PARITY_SILENT_RANGES
+                   ) -> np.ndarray:
+    """Fala VCTK + ruído em blocos de `block_frames` quadros com SNR variável (um por bloco, cíclico) e lacunas
+    silenciosas (quadros [a, b)) no início e no meio, para exercitar todos os estágios e o congelamento/retomada
+    do estado nos quadros pulados."""
     from cctrain.data.audio import load_audio, resample
 
     data_root = Path(data_root)
@@ -264,9 +274,14 @@ def parity_mixture(data_root: Path, frames: int = 1000, snr_db: float = 5.0, sil
     speech = np.concatenate(parts)
     speech = np.tile(speech, int(np.ceil(n / speech.size)))[:n].astype(np.float64)
     noise, sr = load_audio(data_root / "raw/noise-wikimedia-cc0/street_traffic_rain_cc0_10s.wav")
-    noise = np.tile(resample(noise, sr, 48_000), 2)[:n].astype(np.float64)
-    noise *= np.sqrt(np.mean(speech**2) / (np.mean(noise**2) * 10 ** (snr_db / 10)))
+    noise = np.tile(resample(noise, sr, 48_000), int(np.ceil(n / (10 * 48_000)) + 1))[:n].astype(np.float64)
+    block = block_frames * HOP
+    for k, start in enumerate(range(0, n, block)):
+        sl = slice(start, min(start + block, n))
+        snr_db = snr_schedule_db[k % len(snr_schedule_db)]
+        noise[sl] *= np.sqrt(np.mean(speech[sl] ** 2) / (np.mean(noise[sl] ** 2) * 10 ** (snr_db / 10)))
     x = speech + noise
     x *= min(1.0, 0.9 / np.max(np.abs(x)))
-    x[: silent_frames * HOP] = 0.0
+    for a, b in silent_ranges:
+        x[a * HOP : b * HOP] = 0.0
     return x.astype(np.float32)
