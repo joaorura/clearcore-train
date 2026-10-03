@@ -25,7 +25,7 @@ def test_flac_ratio_by_sr(tmp_path):
     p = tmp_path / "a.wav"
     sf.write(p, x, 16_000, subtype="PCM_16")
     rec = FileRecord(path="a.wav", sha256=sha256_file(p), source_id="s", license="CC0-1.0", role="train",
-                     speaker=None, split="noise", sr=16_000, num_samples=x.size, band_hz=None, codec="wav")
+                     speaker=None, split="noise", sr=16_000, num_samples=x.size, band_hz=None, codec="wav", attribution="test")
     out = flac_ratio_by_sr([rec], tmp_path)["16000"]
     y, _ = sf.read(p, dtype="float32")
     buf = io.BytesIO()
@@ -66,7 +66,7 @@ def _wav_record(root, name, sr, source, seed):
     sf.write(root / name, x, sr, subtype="PCM_16")
     return FileRecord(path=name, sha256=sha256_file(root / name), source_id=source, license="CC0-1.0",
                       role="train", speaker=None, split="noise", sr=sr, num_samples=x.size, band_hz=None,
-                      codec="wav")
+                      codec="wav", attribution="test")
 
 
 def test_disk_report_splits_by_source_and_uses_main_checkout_for_tract_target(tmp_path, monkeypatch):

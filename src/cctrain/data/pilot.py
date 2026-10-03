@@ -122,7 +122,8 @@ def record_for_audio(path: Path, data_root: Path, *, source: SourceManifest, spe
     return FileRecord(
         path=str(Path(path).relative_to(data_root)), sha256=sha256_file(path), source_id=source.id,
         license=source.license, role=source.role.value, speaker=speaker, split=split, sr=int(sr),
-        num_samples=int(mono.size), band_hz=effective_band_hz(mono, int(sr)), codec=codec)
+        num_samples=int(mono.size), band_hz=effective_band_hz(mono, int(sr)), codec=codec,
+        attribution=source.attribution)
 
 
 def fetch_vctk(paths: Paths) -> list[FileRecord]:
