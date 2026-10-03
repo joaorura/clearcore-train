@@ -81,3 +81,91 @@ def test_goldens_reproduce_bit_exact():
         assert sha256_bytes(x_file.tobytes()) == entry["in_sha256"]
         assert sha256_bytes(y_file.tobytes()) == entry["out_sha256"]
         assert entry["n_out"] == rs.output_length(entry["n_in"])
+
+
+SRS = (16_000, 24_000, 32_000, 44_100, 48_000)
+
+
+def _tone(freq: float, sr: int, seconds: float = 2.0, amp: float = 0.5) -> np.ndarray:
+    n = np.arange(int(sr * seconds))
+    return (amp * np.sin(2 * np.pi * freq * n / sr)).astype(np.float32)
+
+
+def _amplitude(y: np.ndarray, freq: float, sr: int, trim: int = 400) -> float:
+    """Amplitude do componente em `freq` (ajuste de mínimos quadrados sobre o trecho estacionário)."""
+    y = y[trim:-trim].astype(np.float64)
+    n = np.arange(len(y)) + trim
+    basis = np.stack([np.sin(2 * np.pi * freq * n / sr), np.cos(2 * np.pi * freq * n / sr)], axis=1)
+    coef, *_ = np.linalg.lstsq(basis, y, rcond=None)
+    return float(np.hypot(*coef))
+
+
+def _path_length(n: int, sr: int) -> int:
+    from cctrain.data.audio import resample
+
+    if sr == 16_000:
+        return n
+    if sr == 48_000:
+        return rs.output_length(n)
+    return rs.output_length(len(resample(np.zeros(n, np.float32), sr, 48_000)))
+
+
+@pytest.mark.parametrize("sr", SRS)
+@pytest.mark.parametrize("seconds", [0.5, 1.0, 1.0001, 2.0])
+def test_to_16k_length_is_the_output_length_of_the_path(sr, seconds):
+    x = _tone(1000.0, sr, seconds)
+    y = rs.to_16k(x, sr)
+    assert y.dtype == np.float32 and y.ndim == 1
+    assert len(y) == _path_length(len(x), sr)
+    assert abs(len(y) - len(x) * 16_000 / sr) <= 1.0
+
+
+@pytest.mark.parametrize("sr", SRS)
+def test_to_16k_one_khz_tone_amplitude_within_0_1_db(sr):
+    y = rs.to_16k(_tone(1000.0, sr), sr)
+    err_db = 20 * np.log10(_amplitude(y, 1000.0, 16_000) / 0.5)
+    assert abs(err_db) <= 0.1, err_db
+
+
+@pytest.mark.parametrize("sr", SRS)
+def test_to_16k_rejects_alias_above_8_khz_by_60_db(sr):
+    for f in (8_500.0, 10_000.0, 12_000.0, 20_000.0):
+        if f >= sr / 2 - 300:  # fora da banda do SR de entrada: o tom não existe nele
+            continue
+        y = rs.to_16k(_tone(f, sr), sr)
+        alias = abs(f - 16_000 * round(f / 16_000))  # onde a decimação por 3 jogaria o tom sem o filtro
+        rejection_db = 20 * np.log10(0.5 / max(_amplitude(y, alias, 16_000), 1e-12))
+        assert rejection_db >= 60.0, (sr, f, rejection_db)
+
+
+def test_to_16k_native_16k_is_identity_copy():
+    x = _tone(440.0, 16_000, 0.3)
+    y = rs.to_16k(x, 16_000)
+    assert np.array_equal(x, y) and y is not x
+
+
+def test_to_16k_48k_is_the_v1_resampler_bit_exact():
+    x = _tone(1234.0, 48_000, 0.5)
+    assert np.array_equal(rs.to_16k(x, 48_000), rs.resample_48k_to_16k(x))
+
+
+@pytest.mark.parametrize("sr", [24_000, 32_000, 44_100])
+def test_to_16k_other_rates_go_soxr_hq_then_the_v1_filter(sr):
+    from cctrain.data.audio import resample
+
+    x = _tone(700.0, sr, 0.5) + _tone(5000.0, sr, 0.5, 0.1)
+    assert np.array_equal(rs.to_16k(x, sr), rs.resample_48k_to_16k(resample(x, sr, 48_000)))
+
+
+def test_to_16k_rejects_bad_input():
+    with pytest.raises(ValueError, match="1-D"):
+        rs.to_16k(np.zeros((2, 100), np.float32), 48_000)
+    for bad in (0, -1, 44_100.5):
+        with pytest.raises(ValueError, match="sr"):
+            rs.to_16k(np.zeros(100, np.float32), bad)
+
+
+def test_to_16k_empty_input():
+    for sr in SRS:
+        assert rs.to_16k(np.zeros(0, np.float32), sr).shape == (0,)
+
