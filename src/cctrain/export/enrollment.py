@@ -12,6 +12,7 @@ from pathlib import Path
 import numpy as np
 import onnx
 import torch
+from onnx import TensorProto, helper
 from torch import Tensor, nn
 
 from cctrain.models.ecapa import ECAPATDNN
@@ -19,10 +20,12 @@ from cctrain.models.fbank import TractSafeFbank
 from cctrain.models.film import FilmConfig, FilmGenerator
 
 OUTPUT_NAMES = ("gamma_enc", "beta_enc", "gamma_df", "beta_df", "embedding")
+OUTPUT_DIMS = {"gamma_enc": 256, "beta_enc": 256, "gamma_df": 256, "beta_df": 256, "embedding": 192}
+PAD_ZERO = "cctrain_pad_constant_zero"
 
 
 class EnrollmentModel(nn.Module):
-    def __init__(self, fbank: TractSafeFbank, encoder: ECAPATDNN, generator: FilmGenerator):
+    def __init__(self, fbank: nn.Module, encoder: ECAPATDNN, generator: FilmGenerator):
         super().__init__()
         self.fbank = fbank
         self.encoder = encoder
@@ -37,12 +40,19 @@ class EnrollmentModel(nn.Module):
                 e.reshape(-1))
 
 
-def build_prototype(seed: int, context_mode: str, beta_bound: float = 4.0, out_std: float = 0.5) -> EnrollmentModel:
+def random_generator(seed: int, beta_bound: float = 4.0, out_std: float = 0.5) -> FilmGenerator:
+    """Gerador FiLM com a camada de saída aleatória com semente (não identidade), para testes de operadores."""
     torch.manual_seed(seed)
     gen = FilmGenerator(FilmConfig(math.log(10.0), beta_bound))
     with torch.no_grad():
         gen.out.weight.normal_(std=out_std)
         gen.out.bias.normal_(std=out_std)
+    return gen
+
+
+def build_prototype(seed: int, context_mode: str, beta_bound: float = 4.0, out_std: float = 0.5) -> EnrollmentModel:
+    torch.manual_seed(seed)
+    gen = random_generator(seed, beta_bound, out_std)
     return EnrollmentModel(TractSafeFbank(), ECAPATDNN(context_mode=context_mode), gen).eval()
 
 
@@ -75,9 +85,34 @@ def export_enrollment_onnx(model: EnrollmentModel, path: Path) -> Path:
     )
     proto = onnx.load(str(path))
     proto.ir_version = 8
+    tract_fixups(proto)
     onnx.checker.check_model(proto)
     onnx.save(proto, str(path))
     return path
+
+
+def tract_fixups(proto: onnx.ModelProto) -> None:
+    """Ajustes do grafo exportado que o tract 0.19 exige (spec §6.2).
+
+    1. Todo `Pad` com `constant_value` explícito: o exportador omite o terceiro input (ou o deixa vazio) e o tract
+       recusa o nó ("Rules expect 3, node has 2"). O valor 0.0 é inócuo nos Pad de modo reflect.
+    2. Saídas com forma concreta: o `Reshape(-1)` final sai com `dim_param` simbólico quando a inferência de forma do
+       exportador não atravessa o grafo, e o tract recusa saída simbólica; as formas são as do contrato.
+    """
+    graph = proto.graph
+    if any(n.op_type == "Pad" and (len(n.input) < 3 or not n.input[2]) for n in graph.node):
+        graph.initializer.append(helper.make_tensor(PAD_ZERO, TensorProto.FLOAT, [], [0.0]))
+        for n in graph.node:
+            if n.op_type == "Pad" and (len(n.input) < 3 or not n.input[2]):
+                inputs = list(n.input)[:2]
+                del n.input[:]
+                n.input.extend([*inputs, PAD_ZERO])
+    for o in graph.output:
+        if o.name in OUTPUT_DIMS:
+            dims = o.type.tensor_type.shape.dim
+            for d in list(dims):
+                dims.remove(d)
+            dims.add().dim_value = OUTPUT_DIMS[o.name]
 
 
 def speechlike_16k(n: int, seed: int) -> np.ndarray:
