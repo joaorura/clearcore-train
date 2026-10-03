@@ -1,0 +1,35 @@
+{
+  "generator": "scripts/gen_sb_ecapa_reference.py",
+  "speechbrain": "1.1.1",
+  "torch": "2.11.0+cu128",
+  "checkpoint_sha256": "0575cb64845e6b9a10db9bcb74d5ac32b326b8dc90352671d345e2ee3d0126a2",
+  "cases": [
+    "s2_rms-20",
+    "s6_rms-20",
+    "s8_rms-20",
+    "s10_rms-20",
+    "s12_rms-20",
+    "s2_rms-40",
+    "s2_peak0.99",
+    "s12_rms-40",
+    "s12_peak0.99",
+    "s6_rms-40",
+    "s6_peak0.99",
+    "real_ex1",
+    "real_ex2",
+    "real_cat",
+    "real_cat_rms-40",
+    "real_cat_peak0.99",
+    "real_12s",
+    "real_8s"
+  ],
+  "logmel_cases": [
+    "s2_rms-20",
+    "s6_rms-20",
+    "s6_rms-40",
+    "s6_peak0.99",
+    "real_cat"
+  ],
+  "npz_sha256": "67bd953c79d1e4a3284296e8908b84adbb4771b14aefbbbf48687b3236f84f68",
+  "note": "emb = encode_batch(normalize=False) [192]; logmel = Fbank + InputNormalization(sentence) [T, 80]"
+}
