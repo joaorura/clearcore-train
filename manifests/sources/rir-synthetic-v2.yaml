@@ -1,0 +1,10 @@
+id: rir-synthetic-v2
+name: "RIR sintéticas (image source de ordem baixa + cauda estocástica), geradas por cctrain"
+url: "local:scripts/gen_rir_v2.py"
+landing_page: "local"
+license: LicenseRef-cctrain-generated
+license_evidence: "Gerado por este repositório, sem dados de terceiros (spec §4.2; decisão de planejamento 6)"
+role: train
+attribution: "clearcore-train"
+native_sr: 48000
+access: generated
