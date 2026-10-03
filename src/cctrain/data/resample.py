@@ -4,6 +4,9 @@ FIR de fase linear, 241 taps, janela Kaiser beta=8,6, corte 7.600 Hz, decimaçã
 y[n] = sum_k h[k] * x[3n + 120 - k], com zeros fora de [0, L). Decisões de planejamento (item 7):
 h projetado em float64 com ganho DC 1 e publicado em f32; saída com ceil(L/3) amostras; acumulação em
 float64 sobre os coeficientes f32; saída arredondada para f32.
+
+`to_16k` é o caminho até 16 kHz do encoder e do enrollment (M1): 16 kHz passa direto; 48 kHz usa o filtro v1;
+os demais SR vão por soxr HQ até 48 kHz e então pelo mesmo filtro v1 do produto.
 """
 
 from __future__ import annotations
@@ -80,3 +83,20 @@ def golden_inputs() -> dict[str, np.ndarray]:
     for n in (1, 2, 3, 4, 241, 1000):
         out[f"noise_len{n}"] = (0.1 * np.random.default_rng(n).standard_normal(n)).astype(np.float32)
     return out
+
+
+def to_16k(x: np.ndarray, sr: int) -> np.ndarray:
+    """Áudio mono em `sr` Hz -> 16 kHz: 16 kHz = cópia; 48 kHz = `resampler-48k-16k-v1`; outro SR = soxr HQ -> 48 kHz
+    -> `resampler-48k-16k-v1` (o mesmo filtro que o produto aplica ao enrollment)."""
+    from cctrain.data.audio import resample
+
+    x = np.asarray(x, dtype=np.float32)
+    if x.ndim != 1:
+        raise ValueError("entrada mono 1-D")
+    if isinstance(sr, bool) or not isinstance(sr, (int, np.integer)) or sr <= 0:
+        raise ValueError(f"sr deve ser um inteiro positivo, recebido {sr!r}")
+    if sr == FS_OUT:
+        return x.copy()
+    if sr != FS_IN:
+        x = resample(x, int(sr), FS_IN)
+    return resample_48k_to_16k(x)

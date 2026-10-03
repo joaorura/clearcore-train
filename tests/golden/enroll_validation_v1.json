@@ -1,0 +1,222 @@
+{
+ "cases": {
+  "active_179_of_300": {
+   "active_fraction": 0.0,
+   "peak": 0.0,
+   "rms_dbfs": 0.0,
+   "status": "insufficient_speech",
+   "value": 0.596666693687439
+  },
+  "active_180_of_300": {
+   "active_fraction": 0.6,
+   "peak": 0.1,
+   "rms_dbfs": -22.218487,
+   "status": "ok",
+   "value": -1.0
+  },
+  "active_181_of_300": {
+   "active_fraction": 0.60333335,
+   "peak": 0.1,
+   "rms_dbfs": -22.194427,
+   "status": "ok",
+   "value": -1.0
+  },
+  "inf_at_5": {
+   "active_fraction": 0.0,
+   "peak": 0.0,
+   "rms_dbfs": 0.0,
+   "status": "non_finite",
+   "value": 5.0
+  },
+  "long_192001": {
+   "active_fraction": 0.0,
+   "peak": 0.0,
+   "rms_dbfs": 0.0,
+   "status": "too_long",
+   "value": 192001.0
+  },
+  "nan_and_clip": {
+   "active_fraction": 0.0,
+   "peak": 0.0,
+   "rms_dbfs": 0.0,
+   "status": "non_finite",
+   "value": 4.0
+  },
+  "nan_at_1000": {
+   "active_fraction": 0.0,
+   "peak": 0.0,
+   "rms_dbfs": 0.0,
+   "status": "non_finite",
+   "value": 1000.0
+  },
+  "neg_inf_last": {
+   "active_fraction": 0.0,
+   "peak": 0.0,
+   "rms_dbfs": 0.0,
+   "status": "non_finite",
+   "value": 95999.0
+  },
+  "ok_dc_12s": {
+   "active_fraction": 1.0,
+   "peak": 0.1,
+   "rms_dbfs": -20.0,
+   "status": "ok",
+   "value": -1.0
+  },
+  "ok_dc_6s": {
+   "active_fraction": 1.0,
+   "peak": 0.1,
+   "rms_dbfs": -20.0,
+   "status": "ok",
+   "value": -1.0
+  },
+  "one_clipped_sample": {
+   "active_fraction": 0.0,
+   "peak": 0.0,
+   "rms_dbfs": 0.0,
+   "status": "clipping",
+   "value": 1.0
+  },
+  "peak_exactly_099": {
+   "active_fraction": 1.0,
+   "peak": 0.99,
+   "rms_dbfs": -0.087296024,
+   "status": "ok",
+   "value": -1.0
+  },
+  "peak_negative_0995": {
+   "active_fraction": 0.0,
+   "peak": 0.0,
+   "rms_dbfs": 0.0,
+   "status": "clipping",
+   "value": 0.9950000047683716
+  },
+  "peak_next_above_099": {
+   "active_fraction": 0.0,
+   "peak": 0.0,
+   "rms_dbfs": 0.0,
+   "status": "clipping",
+   "value": 0.9900000691413879
+  },
+  "quiet_dc_0.0099": {
+   "active_fraction": 0.0,
+   "peak": 0.0,
+   "rms_dbfs": 0.0,
+   "status": "too_quiet",
+   "value": -40.08729553222656
+  },
+  "quiet_dc_0.0101": {
+   "active_fraction": 1.0,
+   "peak": 0.0101,
+   "rms_dbfs": -39.913574,
+   "status": "ok",
+   "value": -1.0
+  },
+  "quiet_dc_0.01_boundary": {
+   "active_fraction": 0.0,
+   "peak": 0.0,
+   "rms_dbfs": 0.0,
+   "status": "too_quiet",
+   "value": -40.0
+  },
+  "relative_edge_above": {
+   "active_fraction": 1.0,
+   "peak": 0.1,
+   "rms_dbfs": -23.00595,
+   "status": "ok",
+   "value": -1.0
+  },
+  "relative_edge_below": {
+   "active_fraction": 0.0,
+   "peak": 0.0,
+   "rms_dbfs": 0.0,
+   "status": "insufficient_speech",
+   "value": 0.5
+  },
+  "relative_edge_exact": {
+   "active_fraction": 1.0,
+   "peak": 0.1,
+   "rms_dbfs": -23.005959,
+   "status": "ok",
+   "value": -1.0
+  },
+  "relative_threshold_above_floor": {
+   "active_fraction": 0.0,
+   "peak": 0.0,
+   "rms_dbfs": 0.0,
+   "status": "insufficient_speech",
+   "value": 0.4000000059604645
+  },
+  "short_95999": {
+   "active_fraction": 0.0,
+   "peak": 0.0,
+   "rms_dbfs": 0.0,
+   "status": "too_short",
+   "value": 95999.0
+  },
+  "short_empty": {
+   "active_fraction": 0.0,
+   "peak": 0.0,
+   "rms_dbfs": 0.0,
+   "status": "too_short",
+   "value": 0.0
+  },
+  "short_with_nan": {
+   "active_fraction": 0.0,
+   "peak": 0.0,
+   "rms_dbfs": 0.0,
+   "status": "too_short",
+   "value": 95999.0
+  },
+  "silence": {
+   "active_fraction": 0.0,
+   "peak": 0.0,
+   "rms_dbfs": 0.0,
+   "status": "too_quiet",
+   "value": -120.0
+  },
+  "speechlike_12s_39.5dB": {
+   "active_fraction": 0.7316667,
+   "peak": 0.03616689,
+   "rms_dbfs": -39.5,
+   "status": "ok",
+   "value": -1.0
+  },
+  "speechlike_6s_45.0dB": {
+   "active_fraction": 0.0,
+   "peak": 0.0,
+   "rms_dbfs": 0.0,
+   "status": "too_quiet",
+   "value": -45.0
+  },
+  "speechlike_7s_20.0dB": {
+   "active_fraction": 1.0,
+   "peak": 0.3547149,
+   "rms_dbfs": -20.0,
+   "status": "ok",
+   "value": -1.0
+  },
+  "speechlike_9s_30.0dB": {
+   "active_fraction": 0.91333336,
+   "peak": 0.1096402,
+   "rms_dbfs": -30.0,
+   "status": "ok",
+   "value": -1.0
+  },
+  "tail_partial_frame_clips": {
+   "active_fraction": 0.0,
+   "peak": 0.0,
+   "rms_dbfs": 0.0,
+   "status": "clipping",
+   "value": 0.9950000047683716
+  },
+  "tail_partial_frame_ignored_by_vad": {
+   "active_fraction": 1.0,
+   "peak": 0.5,
+   "rms_dbfs": -19.66783,
+   "status": "ok",
+   "value": -1.0
+  }
+ },
+ "source": "clearcore crates/model/src/enrollment.rs @ 818e7ce"
+}
