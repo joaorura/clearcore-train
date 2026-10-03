@@ -5,6 +5,7 @@ Cada trecho alterado é marcado no código com `CCTRAIN-PATCH(<id>)`. Licença d
 | id | arquivo | motivo |
 |---|---|---|
 | io-audiometadata | `DeepFilterNet/df/io.py` | `torchaudio.backend.common.AudioMetaData` não existe no torchaudio >= 2.1 (R02 §1.6) |
+| film | `DeepFilterNet/df/modules.py` (`SqueezedGRU_S.forward`), `DeepFilterNet/df/deepfilternet3.py` (`Encoder.forward`, `DfDecoder.forward`, `DfNet.forward`) | FiLM nos sites do `gen_film_onnx.py` (spec §3.3); `film=None` executa o caminho original |
 
 ## Arquivos removidos
 
