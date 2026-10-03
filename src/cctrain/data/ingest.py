@@ -514,7 +514,7 @@ def _vctk_speaker(rel: str) -> str:
     return PurePosixPath(rel).name.split("_")[0]
 
 
-def ingest_vctk(paths: Paths, log=print, workers: int = 12) -> list[FileRecord]:
+def ingest_vctk(paths: Paths, log=print, workers: int = 48) -> list[FileRecord]:
     from remotezip import RemoteZip
 
     src_id = "vctk-0.92"
