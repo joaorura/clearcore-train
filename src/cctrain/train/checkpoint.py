@@ -89,6 +89,13 @@ def _path(directory: Path, step: int) -> Path:
     return Path(directory) / f"ckpt-{step:08d}.pt"
 
 
+def load_checkpoint(path: Path) -> Checkpoint:
+    ck = _read(Path(path))
+    if ck is None:
+        raise CheckpointError(f"{path}: checkpoint ilegível ou de outro formato")
+    return ck
+
+
 def list_checkpoints(directory: Path) -> list[Checkpoint]:
     """Metadados dos checkpoints legíveis, em ordem de passo. Arquivos truncados ou temporários ficam de fora."""
     out = []

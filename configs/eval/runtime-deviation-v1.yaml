@@ -1,0 +1,21 @@
+# Gate do desvio entre a emulação offline do gating (forward PyTorch + máscara por estágio, usada no treino e no dev)
+# e o caminho do runtime (réplica Python / tract-check), spec §3.5. Congelado pelo SHA-256 em
+# runtime-deviation-v1.sha256; mudar um nível exige runtime-deviation-v2.yaml com justificativa escrita no relatório.
+#
+# Proveniência dos níveis (declarada, não escondida): foram fixados DEPOIS de o M0 medir o desvio no piloto
+# (erro/sinal = -17,5 dB; concordância de estágio = 92,6%; docs/m0-report.md), a partir dos níveis do plano M1
+# (erro/sinal <= -15 dB; concordância >= 90%). Não são pré-registrados no sentido de gates-v1.yaml: a medida
+# do M0 já era conhecida quando o arquivo foi escrito. Por isso o gate é NÃO bloqueante: ele não reprova nada, só
+# escolhe com qual caminho o dev é medido.
+#
+# Regra: se as DUAS medidas passam, o dev usa o forward offline; se qualquer uma falha, usa a réplica do runtime.
+version: 1
+spec: "docs/superpowers/specs/2026-10-03-clearcore-train-pdfnet3-enrollment-design.md §3.5; plano M1, Tarefa 11"
+blocking: false
+levels:
+  error_to_signal_db_max: -15.0
+  stage_agreement_min: 0.90
+choice:
+  pass: offline
+  fail: replica
+m0_measurement_before_freezing: {error_to_signal_db: -17.5, stage_agreement: 0.926}
