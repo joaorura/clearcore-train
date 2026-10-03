@@ -75,7 +75,8 @@ def m1_verdict(inp: M1Inputs) -> Verdict:
     diff = _num(inp.tract.get("max_abs_diff"))
     ok = diff is not None and diff <= float(tp["abs_tol"]) and got == sorted(want) and bool(inp.tract.get("finite"))
     checks.append(Check("tract_parity", diff, f"<= {float(tp['abs_tol'])}", ok,
-                        note=f"durações {got} (exigidas {sorted(want)}); finito={inp.tract.get('finite')}"))
+                        note=f"durações {got} (exigidas {sorted(want)}); finito={inp.tract.get('finite')}; bordas G11 (informativo, "
+                             f"sem nível no m1): max|d|={inp.tract.get('edge_cases_max_abs_diff')}"))
     fn = m1["functional"]
     lo = _num(inp.functional_c3.get("ci_low"))
     scenario = (inp.functional_c3.get("stage") == fn["stage"] and bool(inp.functional_c3.get("same_sex")) is bool(

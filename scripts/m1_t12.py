@@ -59,10 +59,13 @@ def cmd_eer(a) -> None:
     result: dict = {"commit": git_commit(), "trials_lock": str(TRIALS_LOCK.relative_to(REPO)),
                     "caveat_cv": "cv_pt_heldout foi filtrado pelo próprio WeSpeaker (spec §4.6): o EER do WeSpeaker "
                                  "nessa lista é otimista; o do encoder portado não tem esse viés"}
-    with gpu_lock():
-        enc = load_encoder(CKPT_DIR, device="cuda")
-        result["encoder_sha256"] = enc.sha256
-        many = clips_embedder(enc, PATHS.data)
+    import contextlib
+
+    # em CPU não há lock (a GPU está com o estágio C); em CUDA segura o gpu_lock
+    with gpu_lock() if a.device == "cuda" else contextlib.nullcontext():
+        enc = load_encoder(CKPT_DIR, device=a.device)
+        result["encoder_sha256"], result["device"] = enc.sha256, a.device
+        many = clips_embedder(enc, PATHS.data, io_threads=3)
         for name, path in TRIALS.items():
             t0 = time.time()
             r = evaluate_trials_file(path, TRIALS_LOCK, clip_embedder(enc, PATHS.data), embed_many=many)
@@ -308,6 +311,7 @@ def main() -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("eer")
     p.add_argument("--no-wespeaker", action="store_true")
+    p.add_argument("--device", default="cuda")
     p = sub.add_parser("bank")
     p.add_argument("--variants", type=int, default=20)
     p.add_argument("--workers", type=int, default=6)
