@@ -3,7 +3,7 @@
 smoke: 2 min de estágio C no piloto (VCTK `pilot`, ruído sintético) com o encoder PROTÓTIPO (pesos aleatórios do M0),
        sob o gpu_lock; escreve `stage-c-probe.json` (PSS do trainer + workers) e o checkpoint em runs/m1/stage-c-smoke.
 gate:  sobre o checkpoint do smoke, mede o desvio offline x runtime em misturas de dev (LibriSpeech dev-clean, mesmo
-       sexo, SIR 0 dB), escolhe o caminho pelo gate congelado `runtime-deviation-v1` e roda o gate funcional.
+       sexo, SIR 0 dB; C3 = sem ruído é o gate, C4 = com ruído a 10 dB é medida adicional), escolhe o caminho pelo gate congelado `runtime-deviation-v1` e roda o gate funcional.
        Os números do smoke NÃO são evidência do M1 (encoder aleatório, 2 min de treino, ruído sintético).
 A rodada real (dados da Tarefa 8, splits da 9, banco e encoder portado da 12) está pendente.
 """
@@ -59,7 +59,10 @@ def gate() -> None:
     dev = [r for r in read_file_manifest(FILES_DIR / "librispeech-dev-clean-pilot.jsonl") if r.split == "dev"]
     sex = fn.read_librispeech_sex(raw / "SPEAKERS.TXT")
     _, noise, _ = pilot_records(PATHS.data)
-    mixes = fn.build_dev_mixtures(dev, noise, PATHS.data, sex, _embedder(), n_mixtures=40, seed=0)
+    embed = _embedder()
+    mixes = fn.build_dev_mixtures(dev, noise, PATHS.data, sex, embed, n_mixtures=40, condition="C3", seed=0)
+    mixes_c4 = fn.build_dev_mixtures(dev, noise, PATHS.data, sex, embed, n_mixtures=40, condition="C4", snr_db=10.0,
+                                     seed=0)
     asset = build_film_identity_asset(clearcore_root() / "vendor/approved/df-compatible-release-asset-v1.bin",
                                       OUT / "t11-film-asset").path
     runtime = fn.tract_runtime(asset, OUT / "t11-tract")
@@ -77,11 +80,12 @@ def gate() -> None:
         per.append(fn.deviation_metrics(y, stages, runtime(m.noisy, fn.film_vector(gen, m.embedding))))
     dev_deviation = fn.pool_deviation(per)
     path = fn.deviation_gate(dev_deviation)
-    res = fn.functional_gate(ckpt, mixes, path=path, runtime=runtime, base=base)
+    res = fn.functional_gate(ckpt, mixes, path=path, runtime=runtime, base=base)  # C3: o gate
+    res_c4 = fn.functional_gate(ckpt, mixes_c4, path=path, runtime=runtime, base=base)  # C4: medida adicional
     _save("t11_functional_smoke.json", {
         "WARNING": "smoke: encoder protótipo, 2 min, ruído sintético; não é evidência do gate do M1",
         "checkpoint": ckpt.name, "deviation_dev_checkpoint": dev_deviation, "deviation_path": path,
-        "levels_sha256": fn.load_deviation_levels().sha256, "functional": res.__dict__,
+        "levels_sha256": fn.load_deviation_levels().sha256, "functional_c3_gate": res.__dict__, "functional_c4_additional": res_c4.__dict__,
         "dev_speakers": len({m.speaker for m in mixes}), "dev_noise": "noise-synthetic-v1 (piloto)"})
 
 

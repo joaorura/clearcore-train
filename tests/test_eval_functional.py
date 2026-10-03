@@ -162,6 +162,24 @@ def test_dev_mixtures_are_same_sex_sir_zero_and_disjoint_enrollment(dev_corpus):
     assert all(np.array_equal(a.noisy, b.noisy) for a, b in zip(mixes, again))
 
 
+def test_c3_has_no_noise_and_c4_has_noise_at_the_requested_snr(dev_corpus):
+    root, recs, noise, sex = dev_corpus
+    c3 = build_dev_mixtures(recs, [], root, sex, _embed, n_mixtures=4, seed=0)  # C3 é o padrão e dispensa ruído
+    c4 = build_dev_mixtures(recs, noise, root, sex, _embed, n_mixtures=4, condition="C4", snr_db=10.0, seed=0)
+    for m in c3:
+        assert m.snr_db is None and m.sir_db == 0.0
+        # sem ruído: noisy = alvo + interferente; a SIR medida contra o alvo seco (sem RIR) é 0 dB
+        interf_part = m.noisy - m.clean
+        assert abs(10 * np.log10(power(m.clean) / power(interf_part))) < 0.05
+    assert all(m.snr_db == 10.0 for m in c4)
+    # o ruído é medido contra o alvo: com o interferente e o ruído somados, o resíduo supera o de C3
+    assert np.mean([power(m.noisy - m.clean) for m in c4]) > np.mean([power(m.noisy - m.clean) for m in c3])
+    with pytest.raises(ValueError, match="ruído"):
+        build_dev_mixtures(recs, [], root, sex, _embed, n_mixtures=2, condition="C4", seed=0)
+    with pytest.raises(ValueError, match="condition"):
+        build_dev_mixtures(recs, noise, root, sex, _embed, n_mixtures=2, condition="C5", seed=0)
+
+
 def test_dev_mixtures_refuse_test_and_train_splits(dev_corpus):
     root, recs, noise, sex = dev_corpus
     bad = [FileRecord(**{**r.to_dict(), "split": "test"}) for r in recs]

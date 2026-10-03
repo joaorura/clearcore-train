@@ -150,7 +150,7 @@ class DevMixture:
     interferer_speaker: str
     embedding: np.ndarray
     sir_db: float
-    snr_db: float
+    snr_db: float | None  # None em C3 (sem ruído)
     mixture_path: str
     enrollment_paths: tuple[str, ...]
 
@@ -201,9 +201,15 @@ def _enrollment(root: Path, pool: Sequence[FileRecord], exclude: str, rng: np.ra
 
 def build_dev_mixtures(speech: Sequence[FileRecord], noise: Sequence[FileRecord], data_root: Path,
                        sex: Mapping[str, str], embed: Callable[[np.ndarray], np.ndarray], *, n_mixtures: int,
-                       segment_s: float = 3.0, sir_db: float = 0.0, snr_db: float = 10.0, seed: int = 0,
+                       condition: Literal["C3", "C4"] = "C3", segment_s: float = 3.0, sir_db: float = 0.0,
+                       snr_db: float = 10.0, seed: int = 0,
                        allowed_splits: Sequence[str] = DEV_SPLITS) -> list[DevMixture]:
-    """Misturas alvo + interferente + ruído do mesmo sexo, SIR `sir_db`, só de registros do dev (nunca treino/teste)."""
+    """Misturas de mesmo sexo a SIR `sir_db`, só de registros do dev (nunca treino/teste).
+
+    `condition` (R06 §4): C3 = falante concorrente SEM ruído (alvo + interferente; `snr_db` não se aplica e `noise`
+    pode ser vazio); C4 = falante concorrente + ruído a `snr_db`."""
+    if condition not in ("C3", "C4"):
+        raise ValueError(f"condition inválida: {condition!r}")
     bad = sorted({r.split for r in speech if r.split not in allowed_splits})
     if bad:
         raise ValueError(f"split(s) {bad} fora de {list(allowed_splits)}: o gate funcional mede só no dev")
@@ -216,8 +222,8 @@ def build_dev_mixtures(speech: Sequence[FileRecord], noise: Sequence[FileRecord]
         by_spk[r.speaker_key].append(r)
     speakers = sorted(by_spk)
     noise = list(noise)
-    if len(speakers) < 2 or not noise:
-        raise ValueError("o dev precisa de pelo menos 2 falantes com sexo conhecido e 1 ruído")
+    if len(speakers) < 2 or (condition == "C4" and not noise):
+        raise ValueError("o dev precisa de pelo menos 2 falantes com sexo conhecido (e 1 ruído em C4)")
     out: list[DevMixture] = []
     attempt = 0
     while len(out) < n_mixtures:
@@ -238,9 +244,15 @@ def build_dev_mixtures(speech: Sequence[FileRecord], noise: Sequence[FileRecord]
         emb, used = enroll
         target = crop_or_pad(_load48(data_root, t_rec), n, rng)
         interf = crop_or_pad(_load48(data_root, i_rec), n, rng)
-        nz = loop_to_length(_load48(data_root, noise[int(rng.integers(len(noise)))]), n, rng)
-        m = make_mixture(target, [interf], nz, kind=MixKind.TARGET_INTERFERER_NOISE, snr_db=snr_db, sir_db=sir_db)
-        out.append(DevMixture(m.noisy, m.clean, spk, ispk, np.asarray(emb, np.float32), sir_db, snr_db,
+        if condition == "C4":
+            nz = loop_to_length(_load48(data_root, noise[int(rng.integers(len(noise)))]), n, rng)
+            m = make_mixture(target, [interf], nz, kind=MixKind.TARGET_INTERFERER_NOISE, snr_db=snr_db,
+                             sir_db=sir_db)
+        else:
+            m = make_mixture(target, [interf], None, kind=MixKind.TARGET_INTERFERER, snr_db=float("nan"),
+                             sir_db=sir_db)
+        out.append(DevMixture(m.noisy, m.clean, spk, ispk, np.asarray(emb, np.float32), sir_db,
+                              snr_db if condition == "C4" else None,
                               t_rec.path, used))
     return out
 
