@@ -1,0 +1,10 @@
+id: fsd50k-eval-cc0
+name: "FSD50K eval - clipes CC0 sem classes de voz humana (teto conjunto de 15 h com o subconjunto CC BY)"
+url: "https://zenodo.org/records/4060432"
+landing_page: "https://zenodo.org/records/4060432"
+license: CC0-1.0
+license_evidence: "Licença por clipe no JSON de metadados do FSD50K (eval_clips_info_FSD50K.json, campo license = http://creativecommons.org/publicdomain/zero/1.0/); 4.914 de 10.231 clipes do eval (Zenodo 4060432, lido em 2026-10-03). Filtro de voz por rótulo em cctrain.data.ingest.FSD_VOICE_LABELS"
+role: train
+attribution: "Freesound contributors (CC0 1.0) via FSD50K, Fonseca et al., doi:10.5281/zenodo.4060432; atribuição por arquivo no manifest"
+native_sr: 44100
+access: http_range_zip_split

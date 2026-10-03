@@ -11,6 +11,7 @@ def test_allowlisted_licenses_pass_for_train(lic):
 def test_allowlist_is_exactly_the_spec_set_plus_generated():
     assert TRAIN_ALLOWED == {
         "CC0-1.0",
+        "CC-BY-3.0",
         "CC-BY-4.0",
         "Apache-2.0",
         "LicenseRef-public-domain-declared",

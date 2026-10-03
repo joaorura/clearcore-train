@@ -1,0 +1,11 @@
+id: dns-noise-fullband-cc0
+name: "Microsoft DNS Challenge 5 - noise_fullband, fatia Freesound (somente arquivos com origem Freesound determinável; teto de 10 h)"
+url: "https://dnschallengepublic.blob.core.windows.net/dns5archive/V5_training_dataset/noise_fullband/datasets_fullband.noise_fullband.freesound_000.tar.bz2"
+landing_page: "https://github.com/microsoft/DNS-Challenge"
+license: CC0-1.0
+license_evidence: "README.md do microsoft/DNS-Challenge, seção 'Noise' (lido em 2026-10-03): 'Freesound: Only files with CC0 licenses were selected; License: https://creativecommons.org/publicdomain/zero/1.0/'. Os arquivos da fatia freesound_000 se chamam *_Freesound_validated_<id>*.wav; só eles entram (dns_freesound_cc0). AudioSet (CC BY, origem YouTube) e DEMAND (CC BY-SA) ficam fora"
+role: train
+attribution: "Freesound contributors (clips CC0 1.0, selected by Microsoft DNS Challenge 5 noise_fullband); https://creativecommons.org/publicdomain/zero/1.0/"
+native_sr: 48000
+access: http_range_tar_bz2
+restrictions: [freesound_origin_by_filename_only]

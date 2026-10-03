@@ -16,6 +16,7 @@ class Role(StrEnum):
 TRAIN_ALLOWED = frozenset(
     {
         "CC0-1.0",
+        "CC-BY-3.0",
         "CC-BY-4.0",
         "Apache-2.0",
         "LicenseRef-public-domain-declared",

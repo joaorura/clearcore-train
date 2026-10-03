@@ -1,0 +1,10 @@
+id: fsd50k-eval-ccby
+name: "FSD50K eval - clipes CC BY 3.0 sem classes de voz humana (teto conjunto de 15 h com o subconjunto CC0)"
+url: "https://zenodo.org/records/4060432"
+landing_page: "https://zenodo.org/records/4060432"
+license: CC-BY-3.0
+license_evidence: "Licença por clipe no JSON de metadados do FSD50K (campo license = http://creativecommons.org/licenses/by/3.0/); 3.489 de 10.231 clipes do eval (Zenodo 4060432, lido em 2026-10-03). CC BY-NC e Sampling+ ficam fora. CC-BY-3.0 foi acrescentada à allowlist na Tarefa 8 (a spec §4.1 diz 'CC BY' sem versão): decisão a confirmar pelo dono"
+role: train
+attribution: "Freesound contributors (CC BY 3.0) via FSD50K, Fonseca et al., doi:10.5281/zenodo.4060432; autor, título e id do clipe por arquivo no manifest"
+native_sr: 44100
+access: http_range_zip_split

@@ -1,0 +1,10 @@
+id: cml-tts-pt
+name: "CML-TTS Portuguese v0.1 (OpenSLR 146; teto de 30 h e 40 min por falante)"
+url: "https://www.openslr.org/resources/146/cml_tts_dataset_portuguese_v0.1.tar.bz"
+landing_page: "https://www.openslr.org/146/"
+license: CC-BY-4.0
+license_evidence: "Página OpenSLR 146: 'License: CC-BY 4.0 license' (lida em 2026-10-03); áudio original LibriVox, domínio público. md5 743bad054ca861688aa026e505b26aff em cml_tts_dataset.md5"
+role: train
+attribution: "Oliveira, F.S. et al. CML-TTS: A Multilingual Dataset for Speech Synthesis in Low-Resource Languages (2023), OpenSLR 146, CC BY 4.0; áudio de LibriVox (domínio público)."
+native_sr: 24000
+access: http_tar_stream
