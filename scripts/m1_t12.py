@@ -14,6 +14,7 @@ import argparse
 import json
 import sys
 import time
+from pathlib import Path
 
 import numpy as np
 
@@ -127,6 +128,181 @@ def cmd_stage_c(a) -> None:
     log(f"checkpoint final: {ckpt}")
 
 
+def final_checkpoint() -> Path:
+    from cctrain.train.checkpoint import list_checkpoints
+
+    cks = list_checkpoints(OUT / RUN_ID / "checkpoints")
+    if not cks:
+        raise SystemExit(f"sem checkpoint em {OUT / RUN_ID}")
+    return cks[-1].path  # o último: sem seleção de checkpoint pelo dev (nenhum ajuste no dev)
+
+
+def dev_pool():
+    from cctrain.data.splits import speaker_sex
+
+    dev = pools.by_split(pools.speech_records(PATHS), "dev")
+    sex = {k: s for k in {r.speaker_key for r in dev} if (s := speaker_sex(k, PATHS.data))}
+    return [r for r in dev if r.speaker_key in sex], sex
+
+
+def cmd_evaluate(a) -> None:
+    from cctrain.eval import functional as fn
+    from cctrain.export.film import build_film_identity_asset
+    from cctrain.models.dfnet3_upstream import load_upstream_dfnet3
+    from cctrain.models.film import FilmGenerator, load_film_config
+    from cctrain.models.pdfnet3 import PDFNet3
+    from cctrain.paths import clearcore_root
+    from cctrain.train.checkpoint import load_checkpoint
+
+    ckpt = final_checkpoint()
+    dev, sex = dev_pool()
+    _, noise_dev = pools.noise_pools()
+    enc = load_encoder(CKPT_DIR, device="cpu")
+    log(f"checkpoint {ckpt.name}; dev: {len({r.speaker_key for r in dev})} falantes com sexo, ruído de dev {len(noise_dev)}")
+    t0 = time.time()
+    c3 = fn.build_dev_mixtures(dev, [], PATHS.data, sex, enc.embed, n_mixtures=a.n, condition="C3", seed=0)
+    c4 = fn.build_dev_mixtures(dev, noise_dev, PATHS.data, sex, enc.embed, n_mixtures=a.n, condition="C4",
+                               snr_db=10.0, seed=0)
+    log(f"misturas prontas em {time.time() - t0:.0f} s")
+    asset = build_film_identity_asset(clearcore_root() / "vendor/approved/df-compatible-release-asset-v1.bin",
+                                      OUT / "t11-film-asset").path
+    runtime = fn.tract_runtime(asset, OUT / "t12-tract")
+    base, _ = load_upstream_dfnet3(device="cpu")
+    gen = FilmGenerator(load_film_config())
+    gen.load_state_dict(load_checkpoint(ckpt).model)
+    model = PDFNet3(base, gen.eval()).eval()
+    per = []
+    for m in c3[: a.deviation_n]:
+        y, stages = fn.enhance_offline(base, m.noisy, film_model=model, embedding=m.embedding)
+        per.append(fn.deviation_metrics(y, stages, runtime(m.noisy, fn.film_vector(gen, m.embedding))))
+    deviation = fn.pool_deviation(per)
+    path = fn.deviation_gate(deviation)
+    log(f"desvio no checkpoint: {deviation} -> caminho {path}")
+    out = {"checkpoint": ckpt.name, "deviation_dev_checkpoint": deviation, "deviation_path": path,
+           "deviation_levels_sha256": fn.load_deviation_levels().sha256, "n_mixtures_requested": a.n,
+           "dev_speakers": sorted({m.speaker for m in c3}).__len__(), "dev_sources": sorted({r.source_id for r in dev}),
+           "dev_noise": "reserva de 5% do ruído deduplicado (nunca visto no treino)", "encoder_sha256": enc.sha256}
+    for name, mixes in (("c3_gate", c3), ("c4_additional", c4)):
+        t0 = time.time()
+        r = fn.functional_gate(ckpt, mixes, path=path, runtime=runtime, base=base, workers=a.workers)
+        out[f"functional_{name}"] = {**r.__dict__, "same_sex": True, "sir_db": 0.0, "stage": "C",
+                                      "snr_db": None if name == "c3_gate" else 10.0}
+        log(f"{name} ({path}): delta {r.delta_si_sdr_db:+.3f} dB IC95 [{r.ci_low:+.3f}, {r.ci_high:+.3f}] "
+            f"({time.time() - t0:.0f} s)")
+        if path == "replica":  # informativo: o mesmo conjunto pelo forward offline
+            ro = fn.functional_gate(ckpt, mixes, path="offline", base=base)
+            out[f"functional_{name}_offline_informative"] = ro.__dict__
+            log(f"{name} (offline, informativo): delta {ro.delta_si_sdr_db:+.3f} IC95 [{ro.ci_low:+.3f}, {ro.ci_high:+.3f}]")
+        save("t12_functional.json", out)
+
+
+def real_clip(records, rng, n_samples: int) -> np.ndarray:
+    from cctrain.data.audio import load_audio
+    from cctrain.data.resample import to_16k
+
+    parts, total = [], 0
+    for k in rng.permutation(len(records)):
+        x, sr = load_audio(PATHS.data / records[int(k)].path)
+        parts.append(to_16k(x, sr))
+        total += parts[-1].size
+        if total >= n_samples:
+            break
+    return np.concatenate(parts)[:n_samples].astype(np.float32)
+
+
+def cmd_parity(a) -> None:
+    from cctrain.export.enrollment import (
+        export_enrollment_onnx,
+        scale_to_peak,
+        scale_to_rms_dbfs,
+        speechlike_16k,
+    )
+    from cctrain.hashing import sha256_file
+    from cctrain.m1.parity import enrollment_parity, summarize_parity
+    from cctrain.models.film import FilmGenerator, load_film_config
+    from cctrain.models.sb_port import build_enrollment, load_speechbrain_state, port_ecapa
+    from cctrain.train.checkpoint import load_checkpoint
+
+    ckpt = final_checkpoint()
+    gen = FilmGenerator(load_film_config())
+    gen.load_state_dict(load_checkpoint(ckpt).model)
+    model = build_enrollment(port_ecapa(load_speechbrain_state(CKPT_DIR)), gen.eval()).eval()
+    outdir = OUT / "t12-enrollment-final"
+    onnx_path = export_enrollment_onnx(model, outdir / "enrollment.onnx")
+    dev, _ = dev_pool()
+    pool = [r for r in dev if r.source_id == "librispeech-dev-clean"]
+    rng = np.random.default_rng(0)
+    cases: dict[str, np.ndarray] = {}
+    durations = (2, 6, 8, 10, 12)
+    for s in durations:
+        real = real_clip(pool, rng, 16_000 * s)
+        cases[f"{s}s_real_rms-20"] = scale_to_rms_dbfs(real, -20.0)
+        cases[f"{s}s_synthetic_rms-20"] = scale_to_rms_dbfs(speechlike_16k(16_000 * s, s), -20.0)
+    for s in (2, 12):
+        real = real_clip(pool, rng, 16_000 * s)
+        cases[f"{s}s_real_rms-40"] = scale_to_rms_dbfs(real, -40.0)
+        cases[f"{s}s_real_peak0.99"] = scale_to_peak(real, 0.99)
+    required = tuple(cases)
+    n = 96_000
+    imp = np.zeros(n, np.float32)
+    imp[n // 2] = 0.99
+    edges = {"edge_silence": np.zeros(n, np.float32), "edge_dc_0.1": np.full(n, 0.1, np.float32),
+             "edge_full_scale_square": np.where((np.arange(n) // 50) % 2 == 0, 1.0, -1.0).astype(np.float32),
+             "edge_white_noise_peak0.99": scale_to_peak(np.random.default_rng(0).standard_normal(n).astype("f4"), 0.99),
+             "edge_noise_-90dBFS": scale_to_rms_dbfs(np.random.default_rng(1).standard_normal(n).astype("f4"), -90.0),
+             "edge_single_impulse": imp}
+    rows = enrollment_parity(model, onnx_path, {**cases, **edges}, outdir / "cases")
+    summary = summarize_parity(rows, durations_s=durations, required=required)
+    summary["edge_cases_max_abs_diff"] = max(r["tract_max_abs_diff"] for r in rows if r["case"].startswith("edge_"))
+    save("t12_tract.json", {"checkpoint": ckpt.name, "enrollment_onnx_sha256": sha256_file(onnx_path),
+                            "enrollment_onnx_bytes": onnx_path.stat().st_size, "summary": summary, "cases": rows})
+    log(json.dumps(summary))
+
+
+def cmd_ab1(a) -> None:
+    from cctrain.m1.ab1 import ab1_indicator
+    from cctrain.train.embed_bank import dfnet3_denoiser
+
+    dev, _ = dev_pool()
+    utt: dict[str, list[str]] = {}
+    for r in dev:
+        utt.setdefault(r.speaker_key, []).append(r.path)
+    _, noise_dev = pools.noise_pools()
+    enc = load_encoder(CKPT_DIR, device="cpu")
+    res = ab1_indicator(enc.embed, {k: sorted(v) for k, v in sorted(utt.items())}, PATHS.data,
+                        [r.path for r in noise_dev], denoise=dfnet3_denoiser("cpu"), seed=0)
+    res["note"] = ("indicador barato (cosseno do embedding cru/denoisado com o limpo), DFNet3 upstream sem perfil, "
+                   "ruído de dev; informativo, a AB1 completa é do M4")
+    save("t12_ab1.json", res)
+    for k, v in res["by_snr_db"].items():
+        log(f"SNR {k} dB: cos cru {v['cos_raw_clean']['mean']:.3f} denoisado {v['cos_denoised_clean']['mean']:.3f} "
+            f"delta {v['delta_denoised_minus_raw']['mean']:+.3f} IC {v['delta_denoised_minus_raw']['ci95']}")
+
+
+def cmd_report(a) -> None:
+    import shutil
+
+    from cctrain.m1.report import M1Inputs, m1_verdict, render_checks_table
+
+    j = lambda n: json.loads((OUT / n).read_text())  # noqa: E731
+    eer, fnr, tr = j("t12_eer.json"), j("t12_functional.json"), j("t12_tract.json")
+    probe = j("stage-c-probe.json")
+    summ = j(f"{RUN_ID}/summary.json")
+    inp = M1Inputs(
+        eer={k: eer[k]["eer"] for k in TRIALS}, tract=tr["summary"], functional_c3=fnr["functional_c3_gate"],
+        base_sha256=(summ["base_sha256_before"], summ["base_sha256_after"]), probe=probe,
+        disk_free_gb=shutil.disk_usage(PATHS.data).free / 1e9, deviation={**fnr["deviation_dev_checkpoint"],
+                                                                         "path": fnr["deviation_path"]})
+    v = m1_verdict(inp)
+    md = render_checks_table(v)
+    save("t12_verdict.json", {"go": v.go, "blocking_failures": v.blocking_failures, "gates_sha256": v.gates_sha256,
+                              "budget_sha256": v.budget_sha256, "deviation_sha256": v.deviation_sha256,
+                              "checks": [c.__dict__ for c in v.checks]})
+    (OUT / "t12_verdict.md").write_text(md + "\n")
+    print(md)
+    log(f"VEREDITO: {'GO' if v.go else 'NO-GO'}; falhas bloqueantes: {list(v.blocking_failures)}")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -140,10 +316,15 @@ def main() -> int:
     p.add_argument("--max-steps", type=int, default=None)
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--checkpoint-every-min", type=float, default=10.0)
-    for name in ("evaluate", "parity", "ab1", "report"):
+    p = sub.add_parser("evaluate")
+    p.add_argument("--n", type=int, default=240)
+    p.add_argument("--deviation-n", type=int, default=24)
+    p.add_argument("--workers", type=int, default=4)
+    for name in ("parity", "ab1", "report"):
         sub.add_parser(name)
     a = ap.parse_args()
-    {"eer": cmd_eer, "bank": cmd_bank, "stage-c": cmd_stage_c}[a.cmd](a)
+    {"eer": cmd_eer, "bank": cmd_bank, "stage-c": cmd_stage_c, "evaluate": cmd_evaluate, "parity": cmd_parity,
+     "ab1": cmd_ab1, "report": cmd_report}[a.cmd](a)
     return 0
 
 

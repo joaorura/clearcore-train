@@ -127,6 +127,25 @@ def trim_silence(x: np.ndarray, *, frame: int = 960, range_db: float = 35.0, flo
     return x[max(0, active[0] * frame - margin) : min(x.size, (active[-1] + 1) * frame + margin)]
 
 
+def concat_utterances48(rng: np.random.Generator, utterances: Sequence[str], data_root: Path, *,
+                        trim: bool = True) -> np.ndarray:
+    """Falas do falante concatenadas com pausas de 150-400 ms até U[6, 12] s (48 kHz, comprimento múltiplo de 3)."""
+    want = float(rng.uniform(6.0, 12.0))
+    n_want = int(want * 16_000) * 3
+    parts, total, guard = [], 0, 0
+    while total < n_want and guard < 4 * len(utterances) + 8:
+        for k in rng.permutation(len(utterances)):
+            x = _load48(data_root, utterances[int(k)])
+            x = trim_silence(x) if trim else x
+            gap = np.zeros(int(rng.uniform(0.15, 0.40) * SR48), np.float32)
+            parts += [x, gap]
+            total += x.size + gap.size
+            guard += 1
+            if total >= n_want:
+                break
+    return np.concatenate(parts)[:n_want].astype(np.float32)
+
+
 def make_enrollment_audio(rng: np.random.Generator, *, utterances: Sequence[str], data_root: Path,
                           noise: Sequence[str], rirs: Sequence[str], denoise: Callable[[np.ndarray], np.ndarray] | None,
                           p_noise: float = 0.7, snr_db: tuple[float, float] = (0.0, 30.0), p_rir: float = 0.3,
@@ -140,19 +159,7 @@ def make_enrollment_audio(rng: np.random.Generator, *, utterances: Sequence[str]
     if not utterances:
         raise EmbeddingBankError("falante sem falas")
     for _ in range(max_tries):
-        want = float(rng.uniform(6.0, 12.0))
-        n_want = int(want * 16_000) * 3  # amostras a 48 kHz (múltiplo de 3: 16 kHz exato)
-        parts, total, guard = [], 0, 0
-        while total < n_want and guard < 4 * len(utterances) + 8:
-            for k in rng.permutation(len(utterances)):
-                x = trim_silence(_load48(data_root, utterances[int(k)])) if trim else _load48(data_root, utterances[int(k)])
-                gap = np.zeros(int(rng.uniform(0.15, 0.40) * SR48), np.float32)
-                parts += [x, gap]
-                total += x.size + gap.size
-                guard += 1
-                if total >= n_want:
-                    break
-        x = np.concatenate(parts)[:n_want].astype(np.float32)
+        x = concat_utterances48(rng, utterances, data_root, trim=trim)
         if rirs and rng.random() < p_rir:
             x = apply_rir(x, _load48(data_root, rirs[int(rng.integers(len(rirs)))]))
         if noise and rng.random() < p_noise:

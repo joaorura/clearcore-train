@@ -264,6 +264,23 @@ def test_replica_path_uses_the_runtime_for_candidate_and_baseline(base_model, tm
     assert r.stage_fractions["none"] == 1.0
 
 
+def test_replica_path_with_worker_threads_gives_the_same_result(base_model, tmp_path):
+    base, _ = base_model
+
+    def runtime(audio, film):
+        n = len(audio) // HOP
+        gain = 1.0 if film is None else 0.5 + float(film[0])
+        out = np.concatenate([np.zeros(RUNTIME_DELAY, np.float32), gain * audio])[: n * HOP]
+        return ReplicaResult(out, np.zeros(n, np.float32), np.full(n, 3, np.uint8))
+
+    kw = dict(base=base, path="replica", runtime=runtime, resamples=200)
+    a = functional_gate(_ckpt(tmp_path, 0.3), _mixes(), **kw)
+    b = functional_gate(_ckpt(tmp_path, 0.3), _mixes(), workers=3, **kw)
+    assert a.n_mixtures == b.n_mixtures and a.stage_fractions == b.stage_fractions
+    for f in ("delta_si_sdr_db", "ci_low", "ci_high", "candidate_si_sdr_db", "baseline_si_sdr_db"):
+        assert abs(getattr(a, f) - getattr(b, f)) < 1e-6, f
+
+
 def test_replica_path_requires_a_runtime(base_model, tmp_path):
     base, _ = base_model
     with pytest.raises(ValueError, match="runtime"):
