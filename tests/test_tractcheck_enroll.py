@@ -12,6 +12,7 @@ from cctrain.export.enrollment import (
     build_prototype,
     export_enrollment_onnx,
     randomize_bn_stats,
+    scale_to_peak,
     scale_to_rms_dbfs,
     speechlike_16k,
 )
@@ -113,3 +114,97 @@ def test_enrollment_with_random_bn_matches_tract(tmp_path, m0_runs, mode):
         cases.append({"seconds": seconds, "max_abs_err": worst_abs, "worst_excess": worst_excess})
         assert worst_excess <= 0 and worst_abs <= 1e-4, cases[-1]
     (m0_runs / f"enroll_bn_random_{mode}.json").write_text(json.dumps(cases, indent=2) + "\n")
+
+
+# --- Tarefa 10: enrollment.onnx com o encoder SpeechBrain portado (pesos reais) ---
+
+from sb_cases import build_inputs  # noqa: E402
+
+TRACT_ABS_TOL = 1e-4  # nível m1.tract_parity.abs_tol de gates-v1.yaml
+
+
+def _tract_vs_torch(model, onnx_path, x: np.ndarray, tmp_path, tag: str) -> dict:
+    inp, out = tmp_path / f"{tag}.f32", tmp_path / f"{tag}.json"
+    x.astype("<f4").tofile(inp)
+    proc = tractcheck.run("enroll", onnx_path, inp, out)
+    rep = json.loads(out.read_text())
+    assert rep["ok"], (tag, rep.get("error"), proc.stderr)
+    with torch.no_grad():
+        ref = [t.numpy() for t in model(torch.from_numpy(x.astype(np.float32))[None])]
+    worst = 0.0
+    for name, r in zip(OUTPUT_NAMES, ref, strict=True):
+        got = np.asarray(rep["outputs"][name], np.float32)
+        assert got.shape == r.shape and np.isfinite(got).all(), (tag, name)
+        worst = max(worst, float(np.abs(got - r).max()))
+    return {"case": tag, "max_abs_err": worst}
+
+
+def _record_tract(runs, rows: list[dict]) -> None:
+    path = runs / "t10_sb_tract.json"
+    data = json.loads(path.read_text()) if path.exists() else {}
+    data.update({r["case"]: r["max_abs_err"] for r in rows})
+    path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+
+
+def test_sb_enrollment_graph_contract(sb_enrollment_onnx):
+    proto = onnx.load(str(sb_enrollment_onnx))
+    assert [i.name for i in proto.graph.input] == ["audio"]
+    assert [o.name for o in proto.graph.output] == list(OUTPUT_NAMES)
+    # saídas concretas: só a entrada pode ter o N simbólico (tract recusa saída com dim_param)
+    for o in proto.graph.output:
+        dims = o.type.tensor_type.shape.dim
+        assert dims and all(not d.dim_param and d.dim_value > 0 for d in dims), o.name
+    assert not proto.graph.value_info
+    ops = {n.op_type for n in proto.graph.node}
+    # BN fica como BatchNormalization com as estatísticas reais (vem depois da ReLU, não funde em Conv); o tract a
+    # converte em escala/deslocamento e a paridade tract × módulo abaixo prova a conversão
+    assert "BatchNormalization" in ops
+    assert "STFT" not in ops and "DFT" not in ops
+    # o tract 0.19.16 ignora `mode=reflect` do Pad (preenche com zeros): a reflexão do SpeechBrain vai por Gather
+    pads = [n for n in proto.graph.node if n.op_type == "Pad"]
+    assert all(not any(a.name == "mode" and a.s != b"constant" for a in n.attribute) for n in pads)
+    assert all(len(n.input) == 3 and n.input[2] for n in pads)  # constant_value explícito (tract)
+    assert "Gather" in ops
+
+
+@pytest.mark.parametrize(
+    "seconds,level",
+    [(2, "rms-20"), (6, "rms-20"), (8, "rms-20"), (10, "rms-20"), (12, "rms-20"),
+     (2, "rms-40"), (12, "rms-40"), (2, "peak0.99"), (12, "peak0.99")],
+)
+def test_sb_enrollment_matches_tract(seconds, level, sb_enrollment_model, sb_enrollment_onnx, tmp_path, m1_runs):
+    x = build_inputs()[f"s{seconds}_{level}"]
+    row = _tract_vs_torch(sb_enrollment_model, sb_enrollment_onnx, x, tmp_path, f"{seconds}s_{level}")
+    _record_tract(m1_runs, [row])
+    assert row["max_abs_err"] <= TRACT_ABS_TOL, row
+
+
+def _edge_signals() -> dict[str, np.ndarray]:
+    n = 96_000
+    rng = np.random.default_rng(0)
+    impulse = np.zeros(n, np.float32)
+    impulse[n // 2] = 0.99
+    return {
+        "silence": np.zeros(n, np.float32),
+        "dc_0.1": np.full(n, 0.1, np.float32),
+        "full_scale_square": np.where((np.arange(n) // 50) % 2 == 0, 1.0, -1.0).astype(np.float32),
+        "white_noise_peak0.99": scale_to_peak(rng.standard_normal(n).astype(np.float32), 0.99),
+        "noise_-90dBFS": scale_to_rms_dbfs(rng.standard_normal(n).astype(np.float32), -90.0),
+        "single_impulse": impulse,
+    }
+
+
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+@pytest.mark.parametrize(
+    "name", ["silence", "dc_0.1", "full_scale_square", "white_noise_peak0.99", "noise_-90dBFS", "single_impulse"]
+)
+def test_sb_enrollment_edge_cases_are_finite(name, sb_enrollment_model, sb_enrollment_onnx, tmp_path, m1_runs):
+    """G11: sinais de borda não geram NaN/Inf nem no módulo, nem no ORT, nem no tract; tract × módulo <= 1e-4."""
+    import onnxruntime as ort
+
+    x = _edge_signals()[name]
+    sess = ort.InferenceSession(str(sb_enrollment_onnx), providers=["CPUExecutionProvider"])
+    assert all(np.isfinite(o).all() for o in sess.run(None, {"audio": x[None]})), name
+    row = _tract_vs_torch(sb_enrollment_model, sb_enrollment_onnx, x, tmp_path, f"edge_{name}")
+    _record_tract(m1_runs, [row])
+    assert row["max_abs_err"] <= TRACT_ABS_TOL, row
