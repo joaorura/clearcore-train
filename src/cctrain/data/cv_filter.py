@@ -60,7 +60,7 @@ def cv_candidates(records: Iterable[FileRecord], min_clips: int = 20) -> dict[st
     return {k: v for k, v in _group(records).items() if len(v) >= min_clips}
 
 
-def _cap(recs: list[FileRecord], max_clips: int, seed: int) -> list[FileRecord]:
+def cap_per_client(recs: list[FileRecord], max_clips: int, seed: int) -> list[FileRecord]:
     if len(recs) <= max_clips:
         return sorted(recs, key=lambda r: r.path)
     key = lambda r: hashlib.sha256(f"{seed}:{r.path}".encode()).hexdigest()  # noqa: E731
@@ -178,7 +178,7 @@ def cv_filter(records: Iterable[FileRecord], evaluator: Evaluator, *, data_dir: 
     stats.clients_total = len(groups)
     cand = {k: v for k, v in groups.items() if len(v) >= min_candidate_clips}
     stats.clients_candidates = len(cand)
-    pool = [r for k in sorted(cand) for r in _cap(cand[k], max_clips_per_client, seed)]
+    pool = [r for k in sorted(cand) for r in cap_per_client(cand[k], max_clips_per_client, seed)]
     stats.clips_candidates = len(pool)
     embs = embed_records(pool, evaluator, data_dir, cache, workers=workers, log=log)
     stats.clips_unreadable = len(pool) - len(embs)
