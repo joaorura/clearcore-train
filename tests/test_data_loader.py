@@ -8,12 +8,12 @@ from cctrain.data.manifest import FileRecord, ManifestError
 from cctrain.hashing import sha256_file
 
 
-def _write(root, rel, x, sr, source, lic, speaker, split, role="train"):
+def _write(root, rel, x, sr, source, lic, speaker, split, role="train", attribution="test attribution"):
     p = root / rel
     p.parent.mkdir(parents=True, exist_ok=True)
     sf.write(p, x.astype("f4"), sr, subtype="PCM_16")
     return FileRecord(path=rel, sha256=sha256_file(p), source_id=source, license=lic, role=role, speaker=speaker,
-                      split=split, sr=sr, num_samples=x.size, band_hz=None, codec="flac")
+                      split=split, sr=sr, num_samples=x.size, band_hz=None, codec="flac", attribution=attribution)
 
 
 @pytest.fixture()
@@ -75,3 +75,22 @@ def test_dataset_never_trains_on_dev_or_test_even_if_allowed_explicitly(corpus):
     held_out = [FileRecord(**{**speech[0].to_dict(), "speaker": "z", "split": "test"})]
     with pytest.raises(ManifestError, match="dev/teste"):
         PilotMixDataset(held_out + speech, noise, rirs, root, allowed_splits=("pilot", "noise", "rir", "test"))
+
+
+def test_speaker_pool_is_keyed_by_namespaced_speaker(tmp_path):
+    rng = np.random.default_rng(1)
+    mk = lambda src, spk, k: _write(tmp_path, f"{src}/{spk}_{k}.flac", 0.1 * rng.standard_normal(48_000), 48_000,  # noqa: E731
+                                    src, "CC-BY-4.0", spk, "pilot")
+    speech = [mk("vctk-0.92", "1", 0), mk("librispeech-dev-clean", "1", 0)]
+    noise = [_write(tmp_path, "n/n.flac", 0.05 * rng.standard_normal(48_000 * 4), 48_000, "noise-wikimedia-cc0",
+                    "CC0-1.0", None, "noise")]
+    ds = PilotMixDataset(speech, noise, [], tmp_path)
+    assert set(ds.by_speaker) == {"vctk-0.92:1", "librispeech-dev-clean:1"}
+
+
+def test_pilot_split_not_allowed_by_default_trainer_splits(corpus):
+    from cctrain.data.manifest import TRAIN_SPLITS
+
+    root, speech, noise, rirs = corpus
+    with pytest.raises(ValueError, match="falantes"):
+        PilotMixDataset(speech, noise, rirs, root, allowed_splits=TRAIN_SPLITS)

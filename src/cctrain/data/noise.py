@@ -18,6 +18,7 @@ from cctrain.hashing import sha256_file
 
 SOURCE_ID = "noise-synthetic-v1"
 LICENSE = "LicenseRef-cctrain-generated"
+ATTRIBUTION = "clearcore-train"
 COLORS = ("white", "pink", "brown")
 SPECTRAL_EXPONENT = {"white": 0.0, "pink": 1.0, "brown": 2.0}  # potência ~ 1/f^exp
 TARGET_RMS = 0.1
@@ -50,5 +51,5 @@ def write_noise_set(out_dir: Path, seeds: Iterable[int], data_root: Path) -> lis
         records.append(FileRecord(
             path=str(path.relative_to(data_root)), sha256=sha256_file(path), source_id=SOURCE_ID, license=LICENSE,
             role="train", speaker=None, split="noise", sr=48_000, num_samples=int(x.size), band_hz=None,
-            codec="flac"))
+            codec="flac", attribution=ATTRIBUTION))
     return records

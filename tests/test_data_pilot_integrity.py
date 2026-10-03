@@ -26,7 +26,7 @@ def test_every_record_matches_its_file(paths, source_id):
     assert training_records(allowed, load_sources()) == allowed
     for r in records:
         if r.split in NON_TRAIN_SPLITS:
-            with pytest.raises(ManifestError, match="dev/teste"):
+            with pytest.raises(ManifestError, match="dev/teste|pilot"):
                 training_records([r], load_sources())
 
 

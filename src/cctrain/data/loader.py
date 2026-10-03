@@ -20,6 +20,7 @@ from cctrain.data.manifest import (
     FILES_DIR,
     TRAIN_SPLITS,
     FileRecord,
+    ManifestError,
     SourceManifest,
     load_sources,
     read_file_manifest,
@@ -35,6 +36,9 @@ from cctrain.data.mix import (
     mixture_fractions,
 )
 
+# O loader de piloto é o único que aceita `pilot` (medição do M0); o trainer do T1 usa TRAIN_SPLITS.
+PILOT_SPLITS = (*TRAIN_SPLITS, "pilot")
+
 
 @dataclass(frozen=True)
 class PilotLoaderConfig:
@@ -49,16 +53,18 @@ class PilotMixDataset(IterableDataset):
     def __init__(self, speech: Sequence[FileRecord], noise: Sequence[FileRecord], rirs: Sequence[FileRecord],
                  data_root: Path, cfg: PilotLoaderConfig | None = None,
                  sources: Mapping[str, SourceManifest] | None = None,
-                 allowed_splits: Sequence[str] = TRAIN_SPLITS):
+                 allowed_splits: Sequence[str] = PILOT_SPLITS):
         super().__init__()
         sources = sources or load_sources()
         allowed = frozenset(allowed_splits)
-        self.speech = training_records([r for r in speech if r.split in allowed], sources)
-        self.noise = training_records([r for r in noise if r.split in allowed], sources)
-        self.rirs = training_records([r for r in rirs if r.split in allowed], sources)
+        self.speech = training_records([r for r in speech if r.split in allowed], sources, allow_pilot=True)
+        self.noise = training_records([r for r in noise if r.split in allowed], sources, allow_pilot=True)
+        self.rirs = training_records([r for r in rirs if r.split in allowed], sources, allow_pilot=True)
         self.by_speaker: dict[str, list[FileRecord]] = defaultdict(list)
         for r in self.speech:
-            self.by_speaker[r.speaker].append(r)
+            if r.speaker_key is None:
+                raise ManifestError(f"{r.path}: registro de fala sem speaker")
+            self.by_speaker[r.speaker_key].append(r)
         if len(self.by_speaker) < 2:
             raise ValueError("o piloto precisa de pelo menos 2 falantes")
         if not self.noise:
@@ -109,7 +115,7 @@ class PilotMixDataset(IterableDataset):
             yield self._sample(rng)
 
 
-def pilot_records(data_root: Path, librispeech_speakers: int = 20, allowed_splits: Sequence[str] = TRAIN_SPLITS
+def pilot_records(data_root: Path, librispeech_speakers: int = 20, allowed_splits: Sequence[str] = PILOT_SPLITS
                   ) -> tuple[list[FileRecord], list[FileRecord], list[FileRecord]]:
     """Registros do piloto já filtrados por `allowed_splits` (dev/teste nunca entram; spec §4.5)."""
     allowed = frozenset(allowed_splits)

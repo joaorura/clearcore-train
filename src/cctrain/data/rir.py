@@ -20,6 +20,7 @@ from cctrain.hashing import sha256_file
 
 SOURCE_ID = "rir-synthetic-v1"
 LICENSE = "LicenseRef-cctrain-generated"
+ATTRIBUTION = "clearcore-train"
 
 
 @dataclass(frozen=True)
@@ -81,7 +82,7 @@ def write_rir_set(out_dir: Path, seeds: Iterable[int], data_root: Path) -> tuple
         records.append(FileRecord(
             path=str(path.relative_to(data_root)), sha256=sha256_file(path), source_id=SOURCE_ID, license=LICENSE,
             role="train", speaker=None, split="rir", sr=48_000, num_samples=int(h.size), band_hz=None,
-            codec="flac"))
+            codec="flac", attribution=ATTRIBUTION))
         params.append(p)
     return records, params
 

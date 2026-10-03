@@ -5,10 +5,14 @@ import pytest
 
 from cctrain.data.licenses import LicenseRefused
 from cctrain.data.manifest import (
+    MANIFEST_SCHEMA,
+    SPLITS,
+    TRAIN_SPLITS,
     FileRecord,
     ManifestError,
     load_sources,
     lock_entry,
+    migrate_v1,
     read_file_manifest,
     training_records,
     update_lock,
@@ -20,8 +24,8 @@ SHA = "a" * 64
 
 def _rec(**kw) -> FileRecord:
     base = dict(path="raw/vctk/p227/p227_001_mic1.flac", sha256=SHA, source_id="vctk-0.92", license="CC-BY-4.0",
-                role="train", speaker="p227", split="pilot", sr=48000, num_samples=48000, band_hz=20000.0,
-                codec="flac")
+                role="train", speaker="p227", split="train", sr=48000, num_samples=48000, band_hz=20000.0,
+                codec="flac", attribution="Univ. of Edinburgh, CC BY 4.0", schema=2)
     base.update(kw)
     return FileRecord.from_dict(base)
 
@@ -50,7 +54,7 @@ def test_source_id_must_match_filename(tmp_path: Path):
 
 
 @pytest.mark.parametrize("bad", [dict(sha256="xyz"), dict(path="../escape.flac"), dict(path="/abs.flac"),
-                                 dict(sr=0), dict(split="train"), dict(role="nope")])
+                                 dict(sr=0), dict(split="nope"), dict(role="nope")])
 def test_file_record_validation(bad):
     with pytest.raises((ManifestError, ValueError)):
         _rec(**bad)
@@ -139,4 +143,111 @@ def test_lock_refuses_hash_change(tmp_path: Path):
 def test_training_records_refuse_dev_and_test_splits(split):
     with pytest.raises(ManifestError, match="dev/teste"):
         training_records([_rec(split=split)], load_sources())
-    assert training_records([_rec(split="pilot")], load_sources())
+    assert training_records([_rec(split="train")], load_sources())
+
+
+def test_pilot_is_not_trainable_unless_pilot_loader_opts_in():
+    with pytest.raises(ManifestError, match="pilot"):
+        training_records([_rec(split="pilot")], load_sources())
+    assert training_records([_rec(split="pilot")], load_sources(), allow_pilot=True)
+
+
+def test_splits_and_schema_constants():
+    assert SPLITS == {"train", "dev", "test", "noise", "rir", "pilot"}
+    assert TRAIN_SPLITS == ("noise", "rir", "train")
+    assert MANIFEST_SCHEMA == 2 and _rec().schema == 2
+
+
+_V1 = dict(path="raw/vctk/p227/p227_001_mic1.flac", sha256=SHA, source_id="vctk-0.92", license="CC-BY-4.0",
+           role="train", speaker="p227", split="pilot", sr=48000, num_samples=48000, band_hz=20000.0, codec="flac")
+
+
+def test_migrate_v1_keeps_pilot_split_and_takes_attribution_from_source():
+    rec = migrate_v1(_V1)
+    assert rec.split == "pilot" and rec.schema == 2
+    assert rec.attribution == load_sources()["vctk-0.92"].attribution
+    with pytest.raises(ManifestError, match="pilot"):
+        training_records([rec], load_sources())
+    with pytest.raises(ManifestError, match="fonte"):
+        migrate_v1({**_V1, "source_id": "desconhecida"})
+    with pytest.raises(ManifestError, match="chaves"):
+        migrate_v1({**_V1, "extra": 1})
+
+
+def test_read_file_manifest_reads_v1_and_v2_lines(tmp_path: Path):
+    v2 = _rec(path="b.flac")
+    f = tmp_path / "m.jsonl"
+    f.write_text(json.dumps(_V1, sort_keys=True) + "\n" + json.dumps(v2.to_dict(), sort_keys=True) + "\n",
+                 encoding="utf-8")
+    back = read_file_manifest(f)
+    assert [r.schema for r in back] == [2, 2] and back[0].attribution and back[1] == v2
+
+
+def test_real_m0_pilot_manifests_migrate():
+    from cctrain.data.manifest import FILES_DIR
+
+    recs = read_file_manifest(FILES_DIR / "vctk-0.92-pilot.jsonl")
+    assert len(recs) == 406 and {r.split for r in recs} == {"pilot", "test"}
+
+
+@pytest.mark.parametrize("bad", [dict(license=""), dict(license="  "), dict(license=None), dict(attribution=""),
+                                 dict(attribution=None)])
+def test_record_without_license_or_attribution_is_refused(bad):
+    with pytest.raises(ManifestError):
+        _rec(**bad)
+
+
+def test_v2_dict_without_attribution_is_refused():
+    d = _rec().to_dict()
+    del d["attribution"]
+    with pytest.raises(ManifestError, match="chaves"):
+        FileRecord.from_dict(d)
+    with pytest.raises(ManifestError, match="schema"):
+        _rec(schema=1)
+
+
+@pytest.mark.parametrize("split", ["train", "dev", "pilot"])
+def test_speech_split_requires_speaker(split):
+    with pytest.raises(ManifestError, match="speaker"):
+        _rec(speaker=None, split=split)
+    assert _rec(speaker=None, split="noise").speaker_key is None
+    assert _rec(speaker=None, split="rir").speaker_key is None
+
+
+def test_speaker_key_is_namespaced_by_source():
+    a = _rec(source_id="vctk-0.92", speaker="1")
+    b = _rec(source_id="librispeech-dev-clean", speaker="1")
+    assert a.speaker_key == "vctk-0.92:1" and b.speaker_key == "librispeech-dev-clean:1"
+    assert a.speaker_key != b.speaker_key
+
+
+@pytest.mark.parametrize("bad", [dict(sr=48000.0), dict(sr="48000"), dict(sr=True), dict(num_samples=1.5),
+                                 dict(num_samples="10"), dict(num_samples=None), dict(sr=None)])
+def test_sr_and_num_samples_validated_by_type(bad):
+    with pytest.raises(ManifestError):
+        _rec(**bad)
+
+
+@pytest.mark.parametrize("sep", ["\u2028", "\u2029"])
+def test_unicode_line_separators_in_jsonl(tmp_path: Path, sep):
+    rec = _rec(speaker=f"a{sep}b")
+    f = tmp_path / "m.jsonl"
+    write_file_manifest([rec, _rec(path="z.flac")], f)
+    raw = f.read_bytes().decode("utf-8")
+    assert sep not in raw and len(raw.splitlines()) == 2
+    assert read_file_manifest(f)[0] == rec
+    # separador U+2028/U+2029 solto entre registros não é quebra de linha JSONL: erro controlado
+    line = json.dumps(_rec().to_dict())
+    f.write_text(line + sep + line + "\n", encoding="utf-8")
+    with pytest.raises(ManifestError):
+        read_file_manifest(f)
+
+
+@pytest.mark.parametrize("content", ["{not json", "[1, 2]", ""])
+def test_corrupt_lock_is_manifest_error(tmp_path: Path, content):
+    lock = tmp_path / "lock.json"
+    lock.write_text(content, encoding="utf-8")
+    with pytest.raises(ManifestError, match="lock"):
+        lock_entry("s", "a", lock)
+    with pytest.raises(ManifestError, match="lock"):
+        update_lock("s", "a", SHA, 1, lock_path=lock)
