@@ -96,7 +96,7 @@ def pilot_records(data_root: Path, librispeech_speakers: int = 20) -> tuple[list
     libri = read_file_manifest(FILES_DIR / "librispeech-dev-clean-pilot.jsonl")
     keep = sorted({r.speaker for r in libri})[:librispeech_speakers]
     speech = vctk + [r for r in libri if r.speaker in keep]
-    cv_manifest = Path(data_root) / "manifests" / "cv26-ptbr.jsonl"
+    cv_manifest = Path(data_root) / "manifests" / "cv27-pt.jsonl"
     if cv_manifest.is_file():
         speech += read_file_manifest(cv_manifest)
     noise = read_file_manifest(FILES_DIR / "noise-wikimedia-cc0-pilot.jsonl")

@@ -12,6 +12,7 @@ import os
 import shutil
 import subprocess
 import tarfile
+import time
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -23,6 +24,10 @@ from cctrain.disk import require_free
 
 USER_AGENT = "clearcore-train/0.1 (research data fetch)"
 CHUNK = 1 << 20
+RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+MAX_ATTEMPTS = 3
+BACKOFF_BASE_S = 2.0
+BACKOFF_MAX_S = 30.0
 
 
 class IntegrityError(RuntimeError):
@@ -40,6 +45,15 @@ def _is_url(source: str | Path) -> bool:
     return isinstance(source, str) and source.startswith(("http://", "https://"))
 
 
+def _retry_delay(r: requests.Response, attempt: int) -> float:
+    """Backoff exponencial; honra Retry-After (em segundos) quando presente, com teto."""
+    delay = BACKOFF_BASE_S * 2 ** (attempt - 1)
+    retry_after = r.headers.get("Retry-After", "")
+    if retry_after.isdigit():
+        delay = max(delay, float(retry_after))
+    return min(delay, BACKOFF_MAX_S)
+
+
 def _chunks(source: str | Path, *, headers: Mapping[str, str] | None = None,
             session: requests.Session | None = None, timeout: float = 60.0) -> Iterator[bytes]:
     if not _is_url(source):
@@ -47,8 +61,14 @@ def _chunks(source: str | Path, *, headers: Mapping[str, str] | None = None,
             yield from iter(lambda: f.read(CHUNK), b"")
         return
     s = session or requests.Session()
-    with s.get(str(source), stream=True, timeout=timeout,
-               headers={"User-Agent": USER_AGENT, **(headers or {})}) as r:
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        r = s.get(str(source), stream=True, timeout=timeout, headers={"User-Agent": USER_AGENT, **(headers or {})})
+        if r.status_code in RETRY_STATUSES and attempt < MAX_ATTEMPTS:
+            r.close()
+            time.sleep(_retry_delay(r, attempt))
+            continue
+        break
+    with r:
         r.raise_for_status()
         for chunk in r.iter_content(CHUNK):
             if chunk:
