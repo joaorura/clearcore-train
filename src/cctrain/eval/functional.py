@@ -28,7 +28,7 @@ from cctrain.data.features import SR, extract_features
 from cctrain.data.manifest import FileRecord
 from cctrain.data.mix import MixKind, crop_or_pad, loop_to_length, make_mixture, mix_rng
 from cctrain.data.resample import to_16k
-from cctrain.eval.gates import GatesError, load_gates, verify_frozen
+from cctrain.eval.gates import GATES_V2, GatesError, load_gates, verify_frozen
 from cctrain.eval.runtime_path import (
     HOP,
     LOOKAHEAD,
@@ -346,7 +346,7 @@ def functional_gate(ckpt: Path, dev_mixtures: Sequence[DevMixture], *, path: Pat
     gen.load_state_dict(load_checkpoint(Path(ckpt)).model)
     gen.eval()
     model = PDFNet3(base, gen).eval()
-    level = float(load_gates().m1["functional"]["delta_si_sdr_ci_lower_gt"])
+    level = float(load_gates(GATES_V2).m1["functional"]["delta_si_sdr_ci_lower_gt"])
     deltas, spk, b_all, c_all = [], [], [], []
     stage_counts = np.zeros(len(Stage))
     for m in dev_mixtures:
