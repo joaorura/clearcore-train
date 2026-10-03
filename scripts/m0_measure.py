@@ -15,7 +15,7 @@ from cctrain.data.pilot import PILOT_MANIFESTS
 from cctrain.m0 import beta_probe, disk_probe, loader_probe, offline_probe, step_probe
 from cctrain.m0.gpu_monitor import GpuMonitor
 from cctrain.models.dfnet3_upstream import load_upstream_dfnet3
-from cctrain.models.film import FilmConfig, FilmGenerator
+from cctrain.models.film import FilmGenerator, load_film_config
 from cctrain.models.pdfnet3 import PDFNet3
 from cctrain.paths import Paths, clearcore_root
 
@@ -72,7 +72,7 @@ def step() -> None:
     print(f"VRAM livre {free / 1024**3:.2f} / {total / 1024**3:.2f} GiB")
     for name, bsz, with_teacher in (("step_b16", 16, False), ("step_b32", 32, False), ("step_b16_teacher", 16, True)):
         base, _ = load_upstream_dfnet3(device="cpu")
-        model = PDFNet3(base, FilmGenerator(FilmConfig(2.302585092994046, 4.0)))
+        model = PDFNet3(base, FilmGenerator(load_film_config()))
         teacher = load_upstream_dfnet3(device="cuda")[0] if with_teacher else None
         batch = _batches(1, bsz)[0]
         try:
@@ -92,6 +92,14 @@ def beta() -> None:
     acts = beta_probe.collect_site_activations(base, _batches(25, 8), device)
     report = beta_probe.beta_rule_report(acts)
     report["samples"] = 25 * 8
+    fixed = beta_probe.current_beta_bound()
+    if fixed is not None:
+        # B já fixado e congelado: não sobrescreve beta_rule.json; só confere a consistência.
+        if fixed != report["beta_bound"]:
+            raise SystemExit(f"beta_bound fixado ({fixed}) difere do medido ({report['beta_bound']}); "
+                             "mudar B exige nova versão da config; beta_rule.json preservado")
+        print(f"beta_bound {fixed} já fixado e igual ao medido; beta_rule.json preservado")
+        return
     _save("beta_rule", report)
     beta_probe.write_beta_bound(report["beta_bound"])
 

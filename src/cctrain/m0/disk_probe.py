@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import os
 import shutil
+import stat
 from collections import defaultdict
 from collections.abc import Iterable
 from pathlib import Path
@@ -48,27 +49,40 @@ def flac_ratio_by_sr(records: Iterable[FileRecord], data_root: Path) -> dict[str
 
 
 def dir_size(path: Path) -> int:
+    """Soma dos tamanhos dos arquivos regulares, contando cada inode uma vez (hardlinks do target do cargo)."""
     total = 0
+    seen: set[tuple[int, int]] = set()
     for root, _, files in os.walk(path):
         for f in files:
-            p = os.path.join(root, f)
-            if not os.path.islink(p):
-                total += os.path.getsize(p)
+            st = os.lstat(os.path.join(root, f))
+            if not stat.S_ISREG(st.st_mode) or (st.st_dev, st.st_ino) in seen:
+                continue
+            seen.add((st.st_dev, st.st_ino))
+            total += st.st_size
     return total
 
 
 def disk_report(paths: Paths, records: Iterable[FileRecord]) -> dict:
     records = list(records)
+    # O target do cargo e o venv vivem no checkout principal (CCTRAIN_ROOT), não no worktree (paths.repo).
+    main_root = Path(os.environ.get("CCTRAIN_ROOT", paths.repo))
     env_dirs = {
-        "venv": Path(os.environ.get("UV_PROJECT_ENVIRONMENT", paths.repo / ".venv")),
-        "tract_check_target": paths.repo / "tools/tract-check/target",
+        "venv": Path(os.environ.get("UV_PROJECT_ENVIRONMENT", main_root / ".venv")),
+        "tract_check_target": main_root / "tools/tract-check/target",
         "rustup": Path(os.environ.get("RUSTUP_HOME", Path.home() / ".rustup")),
         "data": paths.data,
         "third_party": paths.repo / "third_party",
     }
     rir = [r for r in records if r.split == "rir"]
+    audio = [r for r in records if r.split != "rir"]
+    by_source: dict[str, list[FileRecord]] = defaultdict(list)
+    for r in audio:
+        by_source[r.source_id].append(r)
     return {
-        "by_sr": flac_ratio_by_sr([r for r in records if r.split != "rir"], paths.data),
+        "by_sr": flac_ratio_by_sr(audio, paths.data),
+        # fator representativo por fonte (cada fonte tem um perfil de codec/conteúdo; ex.: VCTK = fala 48 kHz em FLAC)
+        "by_source": {sid: flac_ratio_by_sr(recs, paths.data) for sid, recs in sorted(by_source.items())},
+        "tract_check_target_root": str(main_root),
         "rir": {"count": len(rir), "stored_bytes": sum((paths.data / r.path).stat().st_size for r in rir)},
         "dirs_bytes": {k: dir_size(v) if v.exists() else None for k, v in env_dirs.items()},
         "free_bytes": shutil.disk_usage(paths.data).free,

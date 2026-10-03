@@ -59,3 +59,57 @@ def test_loss_proxy_is_zero_for_identical_inputs_and_positive_otherwise():
     assert float(loss(y, y)) == 0.0
     assert float(loss(y, istft_proxy(spec * 0.5))) > 0.0
     assert isinstance(loss, nn.Module)
+
+
+def _wav_record(root, name, sr, source, seed):
+    x = (0.1 * np.random.default_rng(seed).standard_normal(sr)).astype("f4")
+    sf.write(root / name, x, sr, subtype="PCM_16")
+    return FileRecord(path=name, sha256=sha256_file(root / name), source_id=source, license="CC0-1.0",
+                      role="train", speaker=None, split="noise", sr=sr, num_samples=x.size, band_hz=None,
+                      codec="wav")
+
+
+def test_disk_report_splits_by_source_and_uses_main_checkout_for_tract_target(tmp_path, monkeypatch):
+    from cctrain.m0.disk_probe import disk_report
+    from cctrain.paths import Paths
+
+    main = tmp_path / "main"
+    (main / "tools/tract-check/target").mkdir(parents=True)
+    (main / "tools/tract-check/target/a.bin").write_bytes(b"x" * 1000)
+    data = tmp_path / "data"
+    data.mkdir()
+    recs = [_wav_record(data, "a.wav", 48_000, "src-a", 1), _wav_record(data, "b.wav", 48_000, "src-b", 2),
+            _wav_record(data, "c.wav", 16_000, "src-b", 3)]
+    monkeypatch.setenv("CCTRAIN_ROOT", str(main))
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    paths = Paths(repo=worktree, data=data, runs=tmp_path / "runs", delivery=worktree, build=worktree)
+    rep = disk_report(paths, recs)
+    assert set(rep["by_source"]) == {"src-a", "src-b"}
+    assert set(rep["by_source"]["src-a"]) == {"48000"} and set(rep["by_source"]["src-b"]) == {"48000", "16000"}
+    assert rep["by_source"]["src-a"]["48000"]["files"] == 1
+    assert rep["dirs_bytes"]["tract_check_target"] == 1000
+
+
+def test_dir_size_counts_hardlinks_once(tmp_path):
+    from cctrain.m0.disk_probe import dir_size
+
+    (tmp_path / "a").write_bytes(b"x" * 500)
+    (tmp_path / "b").hardlink_to(tmp_path / "a")
+    (tmp_path / "c").symlink_to(tmp_path / "a")
+    assert dir_size(tmp_path) == 500
+
+
+def test_beta_limitation_note_and_current_bound(tmp_path):
+    from cctrain.m0.beta_probe import current_beta_bound, limitation_note
+
+    assert "7.4 > B=4" in limitation_note(7.43, 4.0) and "<= B=" in limitation_note(3.0, 4.0)
+    p = tmp_path / "film.yaml"
+    p.write_text("beta_bound: null\n")
+    assert current_beta_bound(p) is None
+    p.write_text("beta_bound: 4.0  # fixado\n")
+    assert current_beta_bound(p) == 4.0
+    enc = np.linspace(0, 1, 1001)
+    enc[-1] = 7.4  # cauda acima de B, p99 baixo
+    rep = beta_rule_report({"enc": enc, "df_dec": np.linspace(0, 1, 1001)})
+    assert "7.4 > B=4" in rep["limitation"]
