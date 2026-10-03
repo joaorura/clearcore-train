@@ -130,6 +130,22 @@ def _parse_user_range(headers: Mapping[str, str]) -> tuple[int, int | None] | No
     return int(m.group(1)), (int(m.group(2)) if m.group(2) else None)
 
 
+def _after_failure(e: BaseException, source: str | Path, offset: int, window_len: int | None, progressed: bool,
+                   failures: int, can_resume: bool) -> tuple[int, bool]:
+    """Decide após um corte: (novo contador de falhas, True se a janela já foi toda entregue). Levanta se desiste."""
+    if window_len is not None and offset >= window_len:
+        return failures, True
+    failures = 0 if progressed else failures + 1
+    if offset > 0 and not can_resume:
+        raise ResumeUnsupportedError(
+            f"{_redact(source)}: transferência interrompida em {offset} bytes e sem retomada segura "
+            "(sem Accept-Ranges/validador, ou resume=False)") from None
+    if failures >= MAX_ATTEMPTS:
+        raise _redacted(e, source) from None
+    time.sleep(_retry_delay(None, max(failures, 1)))
+    return failures, False
+
+
 def _chunks(source: str | Path, *, headers: Mapping[str, str] | None = None,
             session: requests.Session | None = None, timeout: float = 60.0, resume: bool = True) -> Iterator[bytes]:
     if not _is_url(source):
@@ -194,20 +210,18 @@ def _chunks(source: str | Path, *, headers: Mapping[str, str] | None = None,
             if window_len is not None and offset < window_len:
                 raise _Truncated
             return
-        except _RESUMABLE_ERRORS + (_Truncated,) as e:
-            if window_len is not None and offset >= window_len:
+        except RedactedHTTPError:
+            raise
+        except requests.RequestException as e:
+            if not isinstance(e, _RESUMABLE_ERRORS):
+                raise _redacted(e, source, getattr(e, "response", None)) from None
+            failures, can_stop = _after_failure(e, source, offset, window_len, progressed, failures, can_resume)
+            if can_stop:
                 return
-            if progressed:
-                failures = 0
-            else:
-                failures += 1
-            if offset > 0 and not can_resume:
-                raise ResumeUnsupportedError(
-                    f"{_redact(source)}: transferência interrompida em {offset} bytes e sem retomada segura "
-                    "(sem Accept-Ranges/validador, ou resume=False)") from None
-            if failures >= MAX_ATTEMPTS:
-                raise _redacted(e, source) from None
-            time.sleep(_retry_delay(None, max(failures, 1)))
+        except _Truncated as e:
+            failures, can_stop = _after_failure(e, source, offset, window_len, progressed, failures, can_resume)
+            if can_stop:
+                return
         finally:
             if r is not None:
                 r.close()
@@ -311,9 +325,9 @@ def _extract_once(source: str | Path, staging: Path, select: Callable[[str], str
                 raise IntegrityError(f"caminho de saída duplicado: {rel!r}")
             seen.add(safe)
             extracted.append(str(safe))
-            if done is not None and done(str(safe)):
-                continue  # já extraído e verificado por quem chamou: o tar em stream pula o corpo
             dest = staging / safe
+            if done is not None and done(str(safe)) and dest.is_file():
+                continue  # já extraído e verificado por quem chamou: o tar em stream pula o corpo
             dest.parent.mkdir(parents=True, exist_ok=True)
             require_free(staging, member.size)
             part = dest.with_name(dest.name + ".part")

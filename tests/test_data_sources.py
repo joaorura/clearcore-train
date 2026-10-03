@@ -525,7 +525,7 @@ def test_extract_tar_stale_staging_without_done_still_refuses(tmp_path):
         stream_extract_tar(archive, tmp_path / "out", lambda n: n)
 
 
-def test_extract_tar_member_never_left_half_written(tmp_path):
+def test_extract_tar_member_never_left_half_written(tmp_path, monkeypatch):
     archive = tmp_path / "a.tar.gz"
     archive.write_bytes(_targz({"big": b"x" * 100_000}))
     from cctrain.data import sources
@@ -536,10 +536,55 @@ def test_extract_tar_member_never_left_half_written(tmp_path):
         real(src, dst, 1024)
         raise OSError("disk exploded")
 
-    sources.shutil.copyfileobj = boom
-    try:
-        with pytest.raises(OSError, match="exploded"):
-            stream_extract_tar(archive, tmp_path / "out", lambda n: n, done=lambda rel: False)
-    finally:
-        sources.shutil.copyfileobj = real
+    monkeypatch.setattr(sources.shutil, "copyfileobj", boom)
+    with pytest.raises(OSError, match="exploded"):
+        stream_extract_tar(archive, tmp_path / "out", lambda n: n, done=lambda rel: False)
     assert not (tmp_path / "out.staging" / "big").exists()  # só existiria completo e conferido
+
+
+def test_done_true_without_file_in_staging_still_extracts(tmp_path):
+    archive = tmp_path / "a.tar.gz"
+    archive.write_bytes(_targz({"a": b"AAA", "b": b"BBB"}))
+    _, files = stream_extract_tar(archive, tmp_path / "out", lambda n: n, done=lambda rel: True)
+    assert files == ["a", "b"]
+    assert (tmp_path / "out" / "a").read_bytes() == b"AAA" and (tmp_path / "out" / "b").read_bytes() == b"BBB"
+
+
+def test_extract_tar_done_with_restart_after_source_changed(resumable, tmp_path):
+    old = {f"m/{i}.bin": np.random.default_rng(i).integers(0, 256, 600_000, dtype=np.uint8).tobytes()
+           for i in range(4)}
+    new = {k: bytes(reversed(v)) for k, v in old.items()}
+    raw_old, raw_new = _targz(old), _targz(new)
+    server, url = resumable(raw_old, cuts=[int(len(raw_old) * 0.6), 0, 0])
+    original = server.resource
+
+    def swap():
+        if len(server.requests) >= 2:  # a retomada já vê o conteúdo novo -> SourceChangedError -> recomeço
+            server.state.update(content=raw_new, etag='"v2"')
+        return original()
+
+    server.resource = swap
+    # `done` confia só no que existir: após o rmtree do recomeço, nada do staging antigo pode ser dado como pronto
+    d, files = stream_extract_tar(url, tmp_path / "out", lambda n: n, done=lambda rel: True,
+                                  expected_sha256=hashlib.sha256(raw_new).hexdigest())
+    assert files == sorted(new) and d.size == len(raw_new)
+    for name, data in new.items():
+        assert (tmp_path / "out" / name).read_bytes() == data
+    assert not (tmp_path / "out.staging").exists()
+
+
+class _RaisingSession:
+    def __init__(self, exc):
+        self.exc = exc
+
+    def get(self, *a, **k):
+        raise self.exc
+
+
+def test_other_request_exceptions_are_redacted_too(tmp_path):
+    import requests
+
+    exc = requests.exceptions.TooManyRedirects("Exceeded 30 redirects for http://h/a.bin?X-Amz-Signature=SECRET")
+    with pytest.raises(RedactedHTTPError) as err:
+        stream_download("http://h/a.bin?X-Amz-Signature=SECRET", tmp_path / "x.bin", session=_RaisingSession(exc))
+    assert "SECRET" not in str(err.value) and err.value.__cause__ is None
