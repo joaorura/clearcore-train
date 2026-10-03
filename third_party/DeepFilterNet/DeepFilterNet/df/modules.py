@@ -729,8 +729,11 @@ class SqueezedGRU_S(nn.Module):
         else:
             self.linear_out = nn.Identity()
 
-    def forward(self, input: Tensor, h=None) -> Tuple[Tensor, Tensor]:
+    def forward(self, input: Tensor, h=None, film=None) -> Tuple[Tensor, Tensor]:
         x = self.linear_in(input)
+        # CCTRAIN-PATCH(film): x' = x * gamma + beta na saída do ReLU de linear_in (spec §3.3).
+        if film is not None:
+            x = x * film[0] + film[1]
         x, h = self.gru(x, h)
         x = self.linear_out(x)
         if self.gru_skip is not None:
