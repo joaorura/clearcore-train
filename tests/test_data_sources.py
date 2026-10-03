@@ -3,6 +3,7 @@ import gzip
 import hashlib
 import http.server
 import io
+import subprocess
 import tarfile
 import threading
 import zipfile
@@ -62,6 +63,8 @@ def www(tmp_path):
     thread.start()
     yield root, f"http://127.0.0.1:{server.server_address[1]}"
     server.shutdown()
+    server.server_close()
+    thread.join()
 
 
 def _targz(entries: dict[str, bytes]) -> bytes:
@@ -151,3 +154,51 @@ def test_cut_clip_produces_10s_mono_48k(tmp_path):
     info = sf.info(tmp_path / "clip.wav")
     assert abs(dur - 10.0) <= 0.01
     assert (info.samplerate, info.channels, info.subtype) == (48_000, 1, "PCM_16")
+
+
+def test_stream_extract_tar_disk_error_leaves_no_staging(tmp_path):
+    archive = tmp_path / "local.tar.gz"
+    archive.write_bytes(_targz({"a.mp3": b"M"}))
+    with pytest.raises(DiskError):
+        stream_extract_tar(archive, tmp_path / "cv", lambda n: n, need_bytes=10**16)
+    assert not (tmp_path / "cv.staging").exists() and not (tmp_path / "cv").exists()
+    _, files = stream_extract_tar(archive, tmp_path / "cv", lambda n: n)  # retry is not refused
+    assert files == ["a.mp3"]
+
+
+def test_stream_extract_tar_rejects_duplicate_destination(tmp_path):
+    archive = tmp_path / "dup.tar.gz"
+    archive.write_bytes(_targz({"a/x.flac": b"1", "b/x.flac": b"2"}))
+    with pytest.raises(IntegrityError, match="duplicado"):
+        stream_extract_tar(archive, tmp_path / "out", lambda n: "same/" + n.rsplit("/", 1)[1])
+    assert not (tmp_path / "out").exists() and not (tmp_path / "out.staging").exists()
+
+
+def test_cut_clip_leaves_no_file_on_failure(tmp_path):
+    raw = tmp_path / "short.wav"
+    sf.write(raw, np.zeros(48_000, dtype="f4"), 48_000)  # 1 s: cannot yield 10 s
+    dest = tmp_path / "clip.wav"
+    with pytest.raises(IntegrityError):
+        cut_clip(raw, dest, start_s=0.0)
+    assert not dest.exists() and not (tmp_path / "clip.wav.part").exists()
+    with pytest.raises(subprocess.CalledProcessError):
+        cut_clip(tmp_path / "missing.wav", dest, start_s=0.0)
+    assert not dest.exists() and not (tmp_path / "clip.wav.part").exists()
+
+
+def test_empty_or_uppercase_hash_does_not_disable_or_break_verification(www, tmp_path):
+    root, base = www
+    (root / "a.bin").write_bytes(b"abc")
+    with pytest.raises(IntegrityError):
+        stream_download(f"{base}/a.bin", tmp_path / "e.bin", expected_sha256="")
+    assert not (tmp_path / "e.bin").exists()
+    sha = hashlib.sha256(b"abc").hexdigest().upper()
+    assert stream_download(f"{base}/a.bin", tmp_path / "u.bin", expected_sha256=sha).size == 3
+
+
+def test_integrity_error_masks_url_query(www, tmp_path):
+    root, base = www
+    (root / "a.bin").write_bytes(b"abc")
+    with pytest.raises(IntegrityError) as exc:
+        stream_download(f"{base}/a.bin?X-Amz-Signature=SECRET#frag", tmp_path / "a.bin", expected_size=99)
+    assert "SECRET" not in str(exc.value) and "/a.bin" in str(exc.value)

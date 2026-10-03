@@ -15,6 +15,7 @@ import tarfile
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from urllib.parse import urlsplit, urlunsplit
 
 import requests
 
@@ -89,12 +90,22 @@ class _HashingReader(io.RawIOBase):
         return StreamDigest(self._sha.hexdigest(), self._md5.hexdigest(), self.size)
 
 
+def _redact(source: str | Path) -> str:
+    """Remove query string e fragmento de URLs (podem conter tokens pré-assinados)."""
+    text = str(source)
+    if _is_url(source):
+        parts = urlsplit(text)
+        host = parts.netloc.rpartition("@")[2]
+        return urlunsplit((parts.scheme, host, parts.path, "", ""))
+    return text
+
+
 def _verify(d: StreamDigest, what: str, sha256: str | None, md5: str | None, size: int | None) -> None:
     if size is not None and d.size != size:
         raise IntegrityError(f"{what}: tamanho {d.size} != {size}")
-    if sha256 and d.sha256 != sha256:
+    if sha256 is not None and d.sha256 != sha256.lower():
         raise IntegrityError(f"{what}: sha256 {d.sha256} != {sha256}")
-    if md5 and d.md5 != md5:
+    if md5 is not None and d.md5 != md5.lower():
         raise IntegrityError(f"{what}: md5 {d.md5} != {md5}")
 
 
@@ -113,7 +124,7 @@ def stream_download(source: str | Path, dest: Path, *, expected_sha256: str | No
             while n := reader.readinto(buf):
                 f.write(memoryview(buf)[:n])
         d = reader.digest()
-        _verify(d, str(source), expected_sha256, expected_md5, expected_size)
+        _verify(d, _redact(source), expected_sha256, expected_md5, expected_size)
     except BaseException:
         part.unlink(missing_ok=True)
         raise
@@ -138,10 +149,11 @@ def stream_extract_tar(source: str | Path, out_dir: Path, select: Callable[[str]
     staging = out_dir.with_name(out_dir.name + ".staging")
     if staging.exists():
         raise IntegrityError(f"{staging} existe de uma extração interrompida; inspecione")
+    require_free(out_dir.parent, need_bytes or 0)
     staging.mkdir(parents=True)
-    require_free(staging, need_bytes or 0)
     reader = _HashingReader(_chunks(source, session=session))
     extracted: list[str] = []
+    seen: set[PurePosixPath] = set()
     try:
         with tarfile.open(fileobj=io.BufferedReader(reader, CHUNK), mode="r|*") as tar:
             for member in tar:
@@ -150,16 +162,20 @@ def stream_extract_tar(source: str | Path, out_dir: Path, select: Callable[[str]
                 rel = select(member.name)
                 if rel is None:
                     continue
-                dest = staging / _safe_rel(rel)
+                safe = _safe_rel(rel)
+                if safe in seen:
+                    raise IntegrityError(f"caminho de saída duplicado: {rel!r}")
+                seen.add(safe)
+                dest = staging / safe
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 require_free(staging, member.size)
                 src = tar.extractfile(member)
                 with open(dest, "wb") as f:
                     shutil.copyfileobj(src, f, CHUNK)
-                extracted.append(str(_safe_rel(rel)))
+                extracted.append(str(safe))
         reader.drain()
         d = reader.digest()
-        _verify(d, str(source), expected_sha256, expected_md5, expected_size)
+        _verify(d, _redact(source), expected_sha256, expected_md5, expected_size)
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
         raise
@@ -209,11 +225,18 @@ def cut_clip(raw: Path, dest: Path, start_s: float, duration_s: float = 10.0) ->
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     require_free(dest.parent, int(duration_s * 48_000 * 2) + (1 << 20))
-    subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-ss", str(start_s), "-t", str(duration_s), "-i",
-                    str(raw), "-ac", "1", "-ar", "48000", "-c:a", "pcm_s16le", str(dest)], check=True)
-    out = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0",
-                          str(dest)], check=True, capture_output=True, text=True)
-    duration = float(out.stdout.strip())
-    if abs(duration - duration_s) > 0.01:
-        raise IntegrityError(f"{dest}: duração {duration} s, esperado {duration_s} s")
+    part = dest.with_name(dest.name + ".part")
+    try:
+        subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-ss", str(start_s), "-t", str(duration_s),
+                        "-i", str(raw), "-ac", "1", "-ar", "48000", "-c:a", "pcm_s16le", "-f", "wav",
+                        str(part)], check=True)
+        out = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0",
+                              str(part)], check=True, capture_output=True, text=True)
+        duration = float(out.stdout.strip())
+        if abs(duration - duration_s) > 0.01:
+            raise IntegrityError(f"{dest}: duração {duration} s, esperado {duration_s} s")
+    except BaseException:
+        part.unlink(missing_ok=True)
+        raise
+    os.replace(part, dest)
     return duration
