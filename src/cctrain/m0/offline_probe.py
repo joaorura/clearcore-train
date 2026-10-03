@@ -25,11 +25,14 @@ def offline_vs_runtime(base, audio: np.ndarray, replica: ReplicaResult) -> dict:
     diff = rt[:n] - off[:n]
     valid = replica.stages[LOOKAHEAD:] != int(Stage.SILENT)
     agree = stages.numpy()[0][: valid.size][valid] == replica.stages[LOOKAHEAD:][valid]
+    silent_fraction = float(1.0 - np.mean(valid))
     return {
         "max_abs_diff": float(np.max(np.abs(diff))),
         "error_to_signal_db": float(10 * np.log10(np.mean(diff.astype(np.float64) ** 2) /
                                                    max(np.mean(rt[:n].astype(np.float64) ** 2), 1e-20))),
         "stage_agreement": float(np.mean(agree)),
+        "stage_agreement_frames": int(valid.sum()),
+        "silent_fraction_excluded": silent_fraction,
         "offline_stage_fractions": {s.name.lower(): float(np.mean(stages.numpy() == int(s))) for s in Stage},
         "note": "emulação offline sem o estado congelado dos decoders; usada no treino (spec §3.5)",
     }
