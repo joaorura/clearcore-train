@@ -2,7 +2,8 @@
 # Ambiente comum das tarefas: source "$HOME/orca/projects/clearcore-train/scripts/env.sh"
 # Sem caminhos pessoais: tudo deriva de $HOME ou de variáveis exportadas pelo orquestrador.
 export CCTRAIN_ROOT="${CCTRAIN_ROOT:-$HOME/orca/projects/clearcore-train}"
-export CCTRAIN_WT="${CCTRAIN_WT:-$CCTRAIN_ROOT}"
+export CCTRAIN_WT="${CCTRAIN_WT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+mkdir -p "$CCTRAIN_WT/build"
 export UV_PROJECT_ENVIRONMENT="${UV_PROJECT_ENVIRONMENT:-$CCTRAIN_ROOT/.venv}"
 export CCTRAIN_PY="$UV_PROJECT_ENVIRONMENT/bin/python"
 export CCTRAIN_TRACT_CHECK_BIN="${CCTRAIN_TRACT_CHECK_BIN:-$CCTRAIN_ROOT/tools/tract-check/target/release/tract-check}"
