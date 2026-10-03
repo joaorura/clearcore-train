@@ -1,1 +1,40 @@
-{}
+{
+  "cv27-pt": {
+    "common-voice-scripted-speech-27-0-portug-c1c03212.tar.gz": {
+      "sha256": "d5c6e70d669378ce8178b2a0f03e3281d67c4ee5ddd5200718221b28e0b93e60",
+      "size": 5209825417,
+      "upstream_checksum": null
+    }
+  },
+  "librispeech-dev-clean": {
+    "dev-clean.tar.gz": {
+      "sha256": "76f87d090650617fca0cac8f88b9416e0ebf80350acb97b343a85fa903728ab3",
+      "size": 337926286,
+      "upstream_checksum": "md5:42e2234ba48799c1f50f24a7926300a1"
+    }
+  },
+  "noise-wikimedia-cc0": {
+    "ac_fan_cc0_10s.ogg": {
+      "sha256": "a30ad8edcd89dcdfa9ea774ad97446a57d409cd8a4a343b9b527ac92d563bad1",
+      "size": 225434,
+      "upstream_checksum": "clearcore-clip:igual"
+    },
+    "forest_rain_cc0_10s.wav": {
+      "sha256": "2dcb538bbb0ed5c70b1ae1aec948f4c009ab9acaa7b828621402d87108ddcd21",
+      "size": 5000000,
+      "upstream_checksum": "clearcore-clip:igual"
+    },
+    "street_traffic_rain_cc0_10s.flac": {
+      "sha256": "22feeb40cb2172db27bd89b16b56757b62a78f4e319a10552a063f56090a56cc",
+      "size": 6000000,
+      "upstream_checksum": "clearcore-clip:igual"
+    }
+  },
+  "vctk-0.92": {
+    "license_text.txt": {
+      "sha256": "b34e17103bfb246f2549fc82a279e6ba28834e0cb42f76a92efc14b72e3a3723",
+      "size": 17416,
+      "upstream_checksum": "md5:2946b37a07baeba80cea628909e28cae"
+    }
+  }
+}
