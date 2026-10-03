@@ -1,0 +1,25 @@
+# Regras de split por falante, comuns ao M1 e ao M2 (spec §4.5). Chave do falante: `source_id:speaker`.
+# Escolhas aleatórias ordenam as chaves por sha256("<seed>:<chave>"): não dependem de versão de biblioteca.
+# Falante de dev/teste não entra no treino do pDFNet3, no enrollment de treino, como interferente nem no ajuste.
+version: 1
+seed: 20261003
+sources:
+  # VCTK: teste fixo (amostras do Clearcore p225/p226; VCTK-DEMAND p232/p257) + 10 sorteados; dev sorteado do resto.
+  vctk-0.92:
+    rule: random_holdout
+    test_fixed: [p225, p226, p232, p257]
+    test_random: 10
+    dev_random: 8
+  # LibriSpeech e CML-TTS: splits oficiais (o `split` do manifest da fonte).
+  librispeech-train-clean-100: {rule: official}
+  librispeech-dev-clean: {rule: official}
+  librispeech-test-clean: {rule: official}
+  cml-tts-pt: {rule: official}
+  tts-portuguese-corpus: {rule: train}
+  # Common Voice: o dev (calibração do limiar de EER do filtro) sai dos `client_id` com >= min_clips clipes antes do
+  # filtro; o teste sai dos retidos pelo filtro (spec §4.6). Os demais clientes ficam em treino.
+  cv27-pt:
+    rule: cv_clients
+    min_clips: 20
+    dev_clients: 40
+    test_clients: 60
