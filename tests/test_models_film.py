@@ -1,9 +1,11 @@
 import math
+import re
 
 import pytest
 import torch
 
 from cctrain.models.film import (
+    FILM_CONFIG_V1,
     FilmConfig,
     FilmConfigError,
     FilmGenerator,
@@ -27,9 +29,20 @@ def test_validator_refuses_out_of_range(gamma_bound, beta):
         FilmConfig(log_gamma_bound=gamma_bound, beta_bound=beta).validate()
 
 
-def test_config_v1_has_gamma_ln10_and_beta_pending_until_m0():
+def test_config_without_beta_is_refused(tmp_path):
+    # Caso "B ausente" (antes do M0) numa cópia temporária: a config commitada já tem B fixado (Task 17).
+    text = re.sub(r"^beta_bound:.*$", "beta_bound: null", FILM_CONFIG_V1.read_text(), flags=re.M)
+    assert "beta_bound: null" in text
+    pending = tmp_path / "film.yaml"
+    pending.write_text(text)
     with pytest.raises(FilmConfigError, match="B"):
-        load_film_config()
+        load_film_config(pending)
+
+
+def test_committed_config_v1_has_gamma_ln10_and_beta_fixed_by_m0():
+    cfg = load_film_config()
+    assert cfg.log_gamma_bound == pytest.approx(LN10)
+    assert cfg.beta_bound is not None and 4.0 <= cfg.beta_bound <= 50.0
 
 
 def test_zero_init_gives_exact_identity_for_any_embedding():
