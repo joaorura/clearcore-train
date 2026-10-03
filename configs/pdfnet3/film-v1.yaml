@@ -1,0 +1,15 @@
+# Gerador FiLM (spec §3.2). Γ = ln 10; B é fixado no M0 (Task 17) pela regra min(50, max(4, 2·p99)) e
+# congelado antes do T2. Enquanto beta_bound for null, load_film_config recusa a config.
+version: 1
+log_gamma_bound: 2.302585092994046
+beta_bound: null
+beta_rule:
+  sites: [enc.emb_gru.linear_in, df_dec.df_gru.linear_in]
+  percentile: 99
+  factor: 2.0
+  min: 4.0
+  max: 50.0
+embedding_dim: 192
+mid_dim: 256
+hidden_dim: 256
+p_drop: {stage_c: 0.0, stage_f: 0.2}
