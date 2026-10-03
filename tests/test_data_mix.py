@@ -33,3 +33,69 @@ def test_mixture_kinds_and_targets():
     assert abs(measured - 5.0) < 1e-4
     loud = make_mixture(10 * t, [10 * i], 10 * n, kind=MixKind.TARGET_INTERFERER_NOISE, snr_db=0.0, sir_db=0.0)
     assert np.max(np.abs(loud.noisy)) <= 0.99 + 1e-6 and np.max(np.abs(loud.clean)) <= 0.99 + 1e-6
+
+
+# --- Tarefa 11: conferência contra spec §4.4 ---
+
+
+def _rng_signals(seed=2, n=48_000):
+    rng = np.random.default_rng(seed)
+    return tuple(0.1 * rng.standard_normal(n) for _ in range(3))
+
+
+def test_noise_snr_is_measured_against_the_target_not_the_interferer():
+    t, i, n = _rng_signals()
+    for snr in (-5.0, 5.0, 20.0):
+        m = make_mixture(t, [i], n, kind=MixKind.TARGET_INTERFERER_NOISE, snr_db=snr, sir_db=0.0)
+        no_noise = make_mixture(t, [i], None, kind=MixKind.TARGET_INTERFERER, snr_db=snr, sir_db=0.0)
+        target_part = m.clean.astype(np.float64)
+        noise_part = m.noisy.astype(np.float64) - no_noise.noisy.astype(np.float64) * _gain(m, no_noise)
+        assert abs(10 * np.log10(power(target_part) / power(noise_part)) - snr) < 0.05
+
+
+def _gain(m, ref):
+    # os dois lados são normalizados por pico; recupera a razão entre as escalas pelo alvo seco
+    return float(np.dot(m.clean, ref.clean) / np.dot(ref.clean, ref.clean))
+
+
+def test_dry_target_is_aligned_to_the_direct_path_delay_of_the_rir():
+    t, i, n = _rng_signals()
+    h = np.zeros(4800)
+    h[137], h[900] = 0.9, 0.3  # caminho direto em 137 amostras, eco depois
+    m = make_mixture(t, [], None, kind=MixKind.TARGET_NOISE, snr_db=5.0, sir_db=float("nan"), rir_target=h)
+    assert not np.any(m.clean[:137])
+    shifted = np.concatenate([np.zeros(137), t])[: len(t)]
+    k = float(np.dot(m.clean, shifted) / np.dot(shifted, shifted))
+    assert np.allclose(m.clean, k * shifted, atol=1e-6)
+    # sem RIR não há deslocamento
+    m0 = make_mixture(t, [], None, kind=MixKind.TARGET_NOISE, snr_db=5.0, sir_db=float("nan"))
+    assert np.allclose(m0.clean, float(np.dot(m0.clean, t) / np.dot(t, t)) * t, atol=1e-6)
+
+
+def test_interferer_only_has_no_sir_and_a_fixed_level():
+    t, i, n = _rng_signals()
+    a = make_mixture(t, [i], None, kind=MixKind.INTERFERER_ONLY, snr_db=5.0, sir_db=-5.0)
+    b = make_mixture(t, [i], None, kind=MixKind.INTERFERER_ONLY, snr_db=5.0, sir_db=25.0)
+    assert np.array_equal(a.noisy, b.noisy) and not np.any(a.clean)
+    assert np.isnan(a.sir_db) and np.isnan(b.sir_db)
+    rms_dbfs = 10 * np.log10(power(a.noisy))
+    assert abs(rms_dbfs - (-25.0)) < 0.05
+
+
+def test_interferer_only_noise_is_measured_against_the_interferers():
+    t, i, n = _rng_signals()
+    quiet = make_mixture(t, [i], None, kind=MixKind.INTERFERER_ONLY, snr_db=0.0, sir_db=float("nan"))
+    noisy = make_mixture(t, [i], n, kind=MixKind.INTERFERER_ONLY, snr_db=0.0, sir_db=float("nan"))
+    g = float(np.dot(noisy.noisy, quiet.noisy) / np.dot(quiet.noisy, quiet.noisy))
+    noise_part = noisy.noisy - g * quiet.noisy
+    assert abs(10 * np.log10(power(g * quiet.noisy) / power(noise_part))) < 0.05
+
+
+def test_mix_rng_varies_with_epoch_and_index_but_is_reproducible():
+    from cctrain.data.mix import mix_rng
+
+    a = mix_rng(7, 0, 3).random(4)
+    assert np.array_equal(a, mix_rng(7, 0, 3).random(4))
+    assert not np.array_equal(a, mix_rng(7, 1, 3).random(4))
+    assert not np.array_equal(a, mix_rng(7, 0, 4).random(4))
+    assert not np.array_equal(a, mix_rng(8, 0, 3).random(4))
