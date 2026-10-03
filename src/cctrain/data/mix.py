@@ -1,4 +1,13 @@
-"""Receita das misturas (spec §4.4), versão do piloto: tipos, frações, SNR/SIR, RIR e alvo seco."""
+"""Receita das misturas (spec §4.4): tipos, frações, SNR/SIR, RIR e alvo seco.
+
+Convenções conferidas contra a §4.4 na Tarefa 11 do M1:
+- o SNR do ruído é medido contra o **alvo** (já com RIR); em `INTERFERER_ONLY`, que não tem alvo, contra os
+  interferentes;
+- o alvo seco da perda é alinhado ao atraso do caminho direto da RIR (pico de |h|), para que a perda compare o
+  mesmo instante da fala que está na mistura;
+- `INTERFERER_ONLY` não tem SIR: o interferente entra num nível fixo (-25 dBFS RMS) e `sir_db` do resultado é NaN;
+- a semente da amostra depende de (semente, época, índice): `mix_rng`.
+"""
 
 from __future__ import annotations
 
@@ -28,6 +37,11 @@ def mixture_fractions(s: float = 0.05) -> dict[MixKind, float]:
     k = (1.0 - s) / 0.9
     return {MixKind.TARGET_NOISE: 0.35 * k, MixKind.TARGET_INTERFERER: 0.20 * k,
             MixKind.TARGET_INTERFERER_NOISE: 0.35 * k, MixKind.INTERFERER_ONLY: s}
+
+
+def mix_rng(seed: int, epoch: int, index: int) -> np.random.Generator:
+    """Gerador da amostra `index` da época `epoch`: reprodutível, varia com a época e não depende do worker."""
+    return np.random.default_rng([int(seed), int(epoch), int(index)])
 
 
 def power(x: np.ndarray) -> float:
@@ -64,14 +78,26 @@ class MixResult:
     sir_db: float
 
 
+def direct_path_delay(h: np.ndarray) -> int:
+    """Atraso (amostras) do caminho direto da RIR: o pico de |h|."""
+    return int(np.argmax(np.abs(np.asarray(h))))
+
+
 def make_mixture(target: np.ndarray, interferers: Sequence[np.ndarray], noise: np.ndarray | None, *,
                  kind: MixKind, snr_db: float, sir_db: float, rir_target: np.ndarray | None = None,
                  rir_interferer: np.ndarray | None = None) -> MixResult:
     n = len(target)
     has_target = kind is not MixKind.INTERFERER_ONLY
-    clean = np.asarray(target, np.float32) if has_target else np.zeros(n, np.float32)
-    wet = apply_rir(clean, rir_target) if (has_target and rir_target is not None) else clean
+    if has_target:
+        dry = np.asarray(target, np.float32)
+        wet = apply_rir(dry, rir_target) if rir_target is not None else dry
+        delay = direct_path_delay(rir_target) if rir_target is not None else 0
+        clean = np.concatenate([np.zeros(delay, np.float32), dry])[:n] if delay else dry
+    else:
+        clean = np.zeros(n, np.float32)
+        wet = clean
     speech = wet.astype(np.float64)
+    interf = None
     if kind in (MixKind.TARGET_INTERFERER, MixKind.TARGET_INTERFERER_NOISE, MixKind.INTERFERER_ONLY):
         interf = np.zeros(n)
         for x in interferers:
@@ -85,6 +111,8 @@ def make_mixture(target: np.ndarray, interferers: Sequence[np.ndarray], noise: n
     noisy = speech
     if noise is not None and kind in (MixKind.TARGET_NOISE, MixKind.TARGET_INTERFERER_NOISE,
                                       MixKind.INTERFERER_ONLY):
-        noisy = speech + scale_for_ratio(speech, noise, snr_db)
+        ref = speech - interf if (has_target and interf is not None) else speech
+        noisy = speech + scale_for_ratio(ref, noise, snr_db)
     gain = min(1.0, PEAK / max(float(np.max(np.abs(noisy))), 1e-9), PEAK / max(float(np.max(np.abs(clean))), 1e-9))
-    return MixResult((noisy * gain).astype(np.float32), (clean * gain).astype(np.float32), kind, snr_db, sir_db)
+    sir_out = float(sir_db) if has_target else float("nan")
+    return MixResult((noisy * gain).astype(np.float32), (clean * gain).astype(np.float32), kind, snr_db, sir_out)
