@@ -3,9 +3,10 @@ name: "Common Voice Scripted Speech 27.0 - Portuguese (variante pt-BR filtrada p
 url: "https://mozilladatacollective.com/datasets/cmu5wui2w00e8nq07idithpm6"
 landing_page: "https://mozilladatacollective.com/datasets/cmu5wui2w00e8nq07idithpm6"
 license: CC0-1.0
-license_evidence: "Mozilla Data Collective, CC0-1.0 (mesma licença do CV 26.0, R05 §2; decisão do dono em 2026-10-03: 27.0 substitui 26.0); download exige aceite dos termos pela conta do dono; conferir a página do 27.0 ao baixar"
+license_evidence: "A página oficial do Mozilla Data Collective da versão 27.0 (https://mozilladatacollective.com/datasets/cmu5wui2w00e8nq07idithpm6) declara CC0-1.0; verificada em 2026-10-03 (fonte: docs/superpowers/research/2026-10-03-clearcore-train/05-datasets-ptbr.md no repo Clearcore). SHA-256 do tar baixado: d5c6e70d669378ce8178b2a0f03e3281d67c4ee5ddd5200718221b28e0b93e60 (sources.lock.json). O download exige aceite dos termos pela conta do dono. O CV 26.0 também era CC0-1.0 (R05 §2); a troca 26.0 -> 27.0 foi decisão do orquestrador em 2026-10-03, não do dono"
 role: train
 attribution: "Mozilla Common Voice contributors, CC0 1.0"
-native_sr: 48000
+# 32 kHz medido em 1.547 de 1.562 clipes (mp3); o esquema tem um único native_sr, então os demais clipes (outras taxas) são lidos pelo sr de cada registro, não por este campo
+native_sr: 32000
 access: manual_owner_download
 restrictions: [no_rehost, no_speaker_identification, no_label_publication, client_id_not_in_git]

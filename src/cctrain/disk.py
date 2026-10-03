@@ -13,7 +13,7 @@ from pathlib import Path
 ENV_MIN_FREE_GB = "CCTRAIN_MIN_FREE_GB"
 DEFAULT_MIN_FREE_GB = 10.0
 VOLATILE_FILESYSTEMS = frozenset({"tmpfs", "ramfs", "devtmpfs"})
-GIB = 1024**3
+GB = 10**9  # decimal, a mesma unidade de `disk.reserve_gb` do budget-v1 e do relatório M0
 MOUNTS = Path("/proc/self/mounts")
 
 
@@ -63,7 +63,7 @@ def reserve_bytes(env: Mapping[str, str] | None = None) -> int:
     value = DEFAULT_MIN_FREE_GB if raw in (None, "") else float(raw)
     if value < 0:
         raise DiskError(f"{ENV_MIN_FREE_GB} negativo: {value}")
-    return int(value * GIB)
+    return int(value * GB)
 
 
 def require_free(
@@ -79,7 +79,7 @@ def require_free(
     free = usage(_existing_ancestor(Path(path))).free
     if free - need_bytes < reserve:
         raise DiskError(
-            f"espaço insuficiente em {path}: livre {free / GIB:.2f} GiB, necessário {need_bytes / GIB:.2f} GiB"
-            f" + reserva {reserve / GIB:.2f} GiB. Liberar disco é decisão do dono; nada é apagado aqui."
+            f"espaço insuficiente em {path}: livre {free / GB:.2f} GB, necessário {need_bytes / GB:.2f} GB"
+            f" + reserva {reserve / GB:.2f} GB. Liberar disco é decisão do dono; nada é apagado aqui."
         )
     return free

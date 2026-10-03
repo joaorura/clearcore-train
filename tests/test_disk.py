@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from cctrain.disk import GIB, DiskError, assert_persistent, filesystem_type, require_free
+from cctrain.disk import GB, DiskError, assert_persistent, filesystem_type, require_free, reserve_bytes
 
 Usage = namedtuple("Usage", "total used free")
 
@@ -32,16 +32,35 @@ def test_tmpfs_is_refused(tmp_path: Path):
 
 def test_require_free_fails_closed(tmp_path: Path):
     m = _mounts(tmp_path)
-    usage = lambda _p: Usage(100 * GIB, 95 * GIB, 5 * GIB)  # noqa: E731
+    usage = lambda _p: Usage(100 * GB, 95 * GB, 5 * GB)  # noqa: E731
     with pytest.raises(DiskError, match="espaço insuficiente"):
-        require_free(Path("/home/user/data"), 1 * GIB, reserve=10 * GIB, mounts_file=m, usage=usage)
+        require_free(Path("/home/user/data"), 1 * GB, reserve=10 * GB, mounts_file=m, usage=usage)
 
 
 def test_require_free_passes_with_room(tmp_path: Path):
     m = _mounts(tmp_path)
-    usage = lambda _p: Usage(100 * GIB, 50 * GIB, 50 * GIB)  # noqa: E731
-    assert require_free(Path("/home/user/data"), 1 * GIB, reserve=10 * GIB, mounts_file=m, usage=usage) == 50 * GIB
+    usage = lambda _p: Usage(100 * GB, 50 * GB, 50 * GB)  # noqa: E731
+    assert require_free(Path("/home/user/data"), 1 * GB, reserve=10 * GB, mounts_file=m, usage=usage) == 50 * GB
 
 
 def test_real_repo_is_persistent(paths):
     assert_persistent(paths.repo)
+
+
+def test_reserve_is_decimal_gb_like_the_budget():
+    # budget-v1: disk.reserve_gb = 10.0 (GB decimais, como o relatório M0); 1 GB = 1e9 B, não 2**30
+    from cctrain.eval.gates import load_budget
+
+    assert GB == 10**9
+    assert reserve_bytes({}) == 10_000_000_000 == int(load_budget().reserve_gb * 1e9)
+    assert reserve_bytes({"CCTRAIN_MIN_FREE_GB": "2.5"}) == 2_500_000_000
+
+
+def test_require_free_boundary_uses_decimal_gb(tmp_path: Path):
+    m = _mounts(tmp_path)
+    usage = lambda _p: Usage(100 * GB, 11 * GB, 11 * GB)  # noqa: E731
+    path = Path("/home/user/data")
+    # livre 11 GB, reserva padrão 10 GB: pedir exatamente 1 GB passa, 1 GB + 1 B falha
+    assert require_free(path, 1 * GB, mounts_file=m, usage=usage) == 11 * GB
+    with pytest.raises(DiskError, match="11.00 GB"):
+        require_free(path, 1 * GB + 1, mounts_file=m, usage=usage)
