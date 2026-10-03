@@ -124,6 +124,9 @@ def pilot_records(data_root: Path, librispeech_speakers: int = 20, allowed_split
     cv_manifest = Path(data_root) / "manifests" / "cv27-pt.jsonl"
     if cv_manifest.is_file():
         speech += read(cv_manifest)
-    noise = read(FILES_DIR / "noise-wikimedia-cc0-pilot.jsonl")
+    noise = read(FILES_DIR / "noise-wikimedia-cc0-pilot.jsonl")  # split test: filtrado fora do treino
+    synthetic_noise = FILES_DIR / "noise-synthetic-v1-pilot.jsonl"  # pilot-only, cost measurement
+    if synthetic_noise.is_file():
+        noise += read(synthetic_noise)
     rirs = read(FILES_DIR / "rir-synthetic-v1-pilot.jsonl")
     return speech, noise, rirs
