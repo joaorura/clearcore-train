@@ -1,0 +1,32 @@
+id: noise-wikimedia-cc0
+name: "Ruídos CC0 do Wikimedia Commons usados nos testes do Clearcore"
+url: "https://commons.wikimedia.org/"
+landing_page: "https://commons.wikimedia.org/"
+license: CC0-1.0
+license_evidence: "Página de cada arquivo no Wikimedia Commons (CC0); mesma seleção de scripts/fetch-voice-samples.sh do Clearcore"
+role: train
+attribution: "Wikimedia Commons contributors, CC0 1.0"
+native_sr: 48000
+access: http_range_ffmpeg_cut
+artifacts:
+  - name: street_traffic_rain_cc0_10s
+    url: "https://upload.wikimedia.org/wikipedia/commons/8/8c/Urban_Street_on_a_Rainy_Afternoon.flac"
+    page: "https://commons.wikimedia.org/wiki/File:Urban_Street_on_a_Rainy_Afternoon.flac"
+    range_bytes: 6000000
+    start_s: 5
+    raw_ext: flac
+    clearcore_sha256: "53f24f9e9e13b04a3285094f145aac5b0f52dabf4caf85bda4c76d61e9c237b3"
+  - name: forest_rain_cc0_10s
+    url: "https://upload.wikimedia.org/wikipedia/commons/b/b6/Light_Rain_Distant_Thunder_July_5th_2016.wav"
+    page: "https://commons.wikimedia.org/wiki/File:Light_Rain_Distant_Thunder_July_5th_2016.wav"
+    range_bytes: 5000000
+    start_s: 0
+    raw_ext: wav
+    clearcore_sha256: "4a02931545d941cccf7526ebd3c892234dee31915882dbb1e2f786ec472da1a1"
+  - name: ac_fan_cc0_10s
+    url: "https://upload.wikimedia.org/wikipedia/commons/d/df/Resident_air-conditioned_out_door_unit.ogg"
+    page: "https://commons.wikimedia.org/wiki/File:Resident_air-conditioned_out_door_unit.ogg"
+    range_bytes: 0
+    start_s: 5
+    raw_ext: ogg
+    clearcore_sha256: "3763bff659ff596d5fa70c673b5aa7901abf39696f1a24810dc551a91abb7c8e"

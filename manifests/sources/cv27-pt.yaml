@@ -1,0 +1,11 @@
+id: cv27-pt
+name: "Common Voice Scripted Speech 27.0 - Portuguese (variante pt-BR filtrada pelo metadado do corpus)"
+url: "https://mozilladatacollective.com/datasets/cmu5wui2w00e8nq07idithpm6"
+landing_page: "https://mozilladatacollective.com/datasets/cmu5wui2w00e8nq07idithpm6"
+license: CC0-1.0
+license_evidence: "Mozilla Data Collective, CC0-1.0 (mesma licença do CV 26.0, R05 §2; decisão do dono em 2026-10-03: 27.0 substitui 26.0); download exige aceite dos termos pela conta do dono; conferir a página do 27.0 ao baixar"
+role: train
+attribution: "Mozilla Common Voice contributors, CC0 1.0"
+native_sr: 48000
+access: manual_owner_download
+restrictions: [no_rehost, no_speaker_identification, no_label_publication, client_id_not_in_git]
