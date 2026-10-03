@@ -1,5 +1,5 @@
 id: cv27-pt
-name: "Common Voice Scripted Speech 27.0 - Portuguese (variante pt-BR filtrada pelo metadado do corpus)"
+name: "Common Voice Scripted Speech 27.0 - Portuguese (validated.tsv sem a variante de Portugal (pt-BR e clipes sem rótulo de variante))"
 url: "https://mozilladatacollective.com/datasets/cmu5wui2w00e8nq07idithpm6"
 landing_page: "https://mozilladatacollective.com/datasets/cmu5wui2w00e8nq07idithpm6"
 license: CC0-1.0

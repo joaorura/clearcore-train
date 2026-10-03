@@ -317,7 +317,7 @@ def _extract_once(source: str | Path, staging: Path, select: Callable[[str], str
         for member in tar:
             if not member.isfile():
                 continue
-            rel = select(member.name)
+            rel = select(member.name, member.size) if getattr(select, "wants_size", False) else select(member.name)
             if rel is None:
                 continue
             safe = _safe_rel(rel)

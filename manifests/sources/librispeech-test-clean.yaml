@@ -1,0 +1,10 @@
+id: librispeech-test-clean
+name: "LibriSpeech test-clean (OpenSLR 12; trials de avaliação)"
+url: "https://www.openslr.org/resources/12/test-clean.tar.gz"
+landing_page: "https://www.openslr.org/12/"
+license: CC-BY-4.0
+license_evidence: "OpenSLR 12 (R03 §3, R04 §1.1); LICENSE.TXT do tar conferido por cctrain.data.ingest (contém 'Attribution 4.0')"
+role: test_only
+attribution: "Panayotov, V., Chen, G., Povey, D., Khudanpur, S. LibriSpeech: an ASR corpus based on public domain audio books. OpenSLR 12. CC BY 4.0."
+native_sr: 16000
+access: http_tar_stream

@@ -1,4 +1,11 @@
 {
+  "cml-tts-pt": {
+    "cml_tts_dataset_portuguese_v0.1.tar.bz": {
+      "sha256": "92b391b2e6337b6209200dc18e0284886e3dd4dcd5ceead13890acaee144f2ec",
+      "size": 9765267843,
+      "upstream_checksum": "md5:743bad054ca861688aa026e505b26aff"
+    }
+  },
   "cv27-pt": {
     "common-voice-scripted-speech-27-0-portug-c1c03212.tar.gz": {
       "sha256": "d5c6e70d669378ce8178b2a0f03e3281d67c4ee5ddd5200718221b28e0b93e60",
@@ -6,11 +13,54 @@
       "upstream_checksum": null
     }
   },
+  "dns-noise-fullband-cc0": {
+    "datasets_fullband.noise_fullband.freesound_000.tar.bz2": {
+      "sha256": "715761950e30d36d5a665f0d61a032a127f9f0978b89be7c83a2aa2b454f4c3d",
+      "size": 3470032239,
+      "upstream_checksum": null
+    }
+  },
+  "fsd50k-eval-cc0": {
+    "FSD50K.eval_audio.z01": {
+      "sha256": "a1b776a5a9466a0cf17d0cb9a2a98f641454084f0292f511718aacb48e6c401d",
+      "size": 3221225472,
+      "upstream_checksum": "md5:3090670eaeecc013ca1ff84fe4442aeb"
+    },
+    "FSD50K.eval_audio.zip": {
+      "sha256": "e3d78e77115ff8d8df1ff3dae7ca5cd5864924c054561f61ba836764254bf50e",
+      "size": 3037675767,
+      "upstream_checksum": "md5:6fa47636c3a3ad5c7dfeba99f2637982"
+    },
+    "FSD50K.ground_truth.zip": {
+      "sha256": "db2396260a7b1fb06feb6ccac71685794fc89917d71c3a8d64a1de85c2cc0ebf",
+      "size": 334701,
+      "upstream_checksum": "md5:ca27382c195e37d2269c4c866dd73485"
+    },
+    "FSD50K.metadata.zip": {
+      "sha256": "9a738e032546f9a2c6e3d04566928d04a65fb79b422cc9d78bb781723537bd19",
+      "size": 6700838,
+      "upstream_checksum": "md5:b9ea0c829a411c1d42adb9da539ed237"
+    }
+  },
   "librispeech-dev-clean": {
     "dev-clean.tar.gz": {
       "sha256": "76f87d090650617fca0cac8f88b9416e0ebf80350acb97b343a85fa903728ab3",
       "size": 337926286,
       "upstream_checksum": "md5:42e2234ba48799c1f50f24a7926300a1"
+    }
+  },
+  "librispeech-test-clean": {
+    "test-clean.tar.gz": {
+      "sha256": "39fde525e59672dc6d1551919b1478f724438a95aa55f874b576be21967e6c23",
+      "size": 346663984,
+      "upstream_checksum": "md5:32fa31d27d2e1cad72775fee3f4849a9"
+    }
+  },
+  "librispeech-train-clean-100": {
+    "train-clean-100.tar.gz": {
+      "sha256": "d4ddd1d5a6ab303066f14971d768ee43278a5f2a0aa43dc716b0e64ecbbbf6e2",
+      "size": 6387309499,
+      "upstream_checksum": "md5:2a93770f6d5c6c964bc36631d331a522"
     }
   },
   "noise-wikimedia-cc0": {
@@ -28,6 +78,13 @@
       "sha256": "22feeb40cb2172db27bd89b16b56757b62a78f4e319a10552a063f56090a56cc",
       "size": 6000000,
       "upstream_checksum": "clearcore-clip:igual"
+    }
+  },
+  "tts-portuguese-corpus": {
+    "TTS-Portuguese-Corpus.zip": {
+      "sha256": "9704531ca602bdef8d974fb440decd104e37db32e5c88a10c53fa15da580966f",
+      "size": 2371059638,
+      "upstream_checksum": null
     }
   },
   "vctk-0.92": {
