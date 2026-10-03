@@ -60,7 +60,10 @@ def verify_frozen(path: Path) -> str:
     lock = path.with_suffix(".sha256")
     if not lock.is_file():
         raise GatesError(f"{lock} ausente: o arquivo não está congelado")
-    expected = lock.read_text().split()[0]
+    tokens = lock.read_text().split()
+    if not tokens:
+        raise GatesError(f"{lock} vazio: o arquivo não está congelado")
+    expected = tokens[0]
     actual = sha256_file(path)
     if actual != expected:
         raise GatesError(f"{path} foi alterado depois de congelado ({actual} != {expected}); crie uma nova versão")

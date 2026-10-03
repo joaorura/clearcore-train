@@ -1,0 +1,2 @@
+# Os coeficientes e goldens do reamostrador são binários: sem normalização de EOL nem diff de texto.
+resampler/** binary

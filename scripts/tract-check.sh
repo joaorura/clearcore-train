@@ -4,6 +4,8 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET_ROOT="${CCTRAIN_ROOT:-$HERE}"
+# Toolchain fixada por variável: vale em qualquer cwd (o rust-toolchain.toml só vale dentro de tools/tract-check).
+export RUSTUP_TOOLCHAIN=1.90.0
 export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
 export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
 export PATH="$CARGO_HOME/bin:$PATH"

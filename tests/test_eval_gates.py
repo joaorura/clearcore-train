@@ -67,3 +67,28 @@ def test_budget_is_frozen():
     assert b.t3["go_hours_max"] == 35.0
     p = BUDGET_V1
     assert p.with_suffix(".sha256").is_file()
+
+
+GATES_V1_SHA256 = "4919f879dc0d34d96270c2ee882b99683affe6304f6d9a03381d2bfa57cd1c13"
+BUDGET_V1_SHA256 = "ff007e54641f7ef17f22081cdbb4bd96c93c7fdee0221412288187666fdd0545"
+
+
+def test_frozen_files_have_literal_sha256():
+    import hashlib
+
+    assert hashlib.sha256(GATES_V1.read_bytes()).hexdigest() == GATES_V1_SHA256
+    assert hashlib.sha256(BUDGET_V1.read_bytes()).hexdigest() == BUDGET_V1_SHA256
+    assert load_gates().sha256 == GATES_V1_SHA256
+    assert load_budget().sha256 == BUDGET_V1_SHA256
+
+
+def test_verify_frozen_rejects_empty_lock(tmp_path: Path):
+    from cctrain.eval.gates import verify_frozen
+
+    p = _copy(tmp_path, GATES_V1)
+    p.with_suffix(".sha256").write_text("")
+    with pytest.raises(GatesError, match="vazio"):
+        verify_frozen(p)
+    p.with_suffix(".sha256").write_text("  \n")
+    with pytest.raises(GatesError, match="vazio"):
+        verify_frozen(p)
