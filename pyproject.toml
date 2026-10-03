@@ -1,0 +1,63 @@
+[project]
+name = "cctrain"
+version = "0.0.0"
+description = "Clearcore Train: pDFNet3 + speaker enrollment (subproject A)"
+requires-python = "==3.11.*"
+license = "MIT OR Apache-2.0"
+dependencies = [
+  "numpy>=1.26,<2",
+  "scipy>=1.11",
+  "torch>=2.7",
+  "torchaudio>=2.7",
+  "deepfilterlib==0.5.6",
+  "onnx>=1.16",
+  "onnxruntime>=1.18",
+  "soundfile>=0.12.1",
+  "soxr>=0.3.7",
+  "pyyaml>=6",
+  "requests>=2.31",
+  "remotezip==0.12.6",
+  "pyroomacoustics>=0.7.4",
+  "safetensors>=0.4",
+  "psutil>=5.9",
+  "loguru>=0.7",
+  "packaging>=23",
+  "appdirs>=1.4",
+  "sympy>=1.6",
+]
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchaudio = { index = "pytorch-cu128" }
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "-ra --basetemp=build/pytest-tmp -m 'not network'"
+markers = [
+  "gpu: precisa de CUDA",
+  "tract: precisa do binário tract-check compilado",
+  "clearcore: precisa de CCTRAIN_CLEARCORE_ROOT",
+  "network: acessa a rede",
+  "data: precisa dos dados do piloto (Task 12)",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+extend-exclude = ["third_party", "build", "data", "runs"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = ["E501", "B905"]

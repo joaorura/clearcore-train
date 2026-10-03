@@ -1,0 +1,11 @@
+clearcore-train
+Licensed under MIT OR Apache-2.0, at your option.
+
+Third-party components:
+
+- DeepFilterNet v0.5.6 (third_party/DeepFilterNet), Copyright (c) Hendrik Schröter,
+  MIT OR Apache-2.0. Patches are marked CCTRAIN-PATCH and listed in third_party/DeepFilterNet/PATCHES.md.
+- add_film() in src/cctrain/export/film.py is copied from tools/accelerators/gen_film_onnx.py of the
+  Clearcore repository (MIT OR Apache-2.0).
+
+Data attributions (CC BY 4.0 sources used for training) are listed per source in manifests/sources/.

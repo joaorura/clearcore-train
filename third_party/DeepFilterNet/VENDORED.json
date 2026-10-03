@@ -1,0 +1,19 @@
+{
+  "upstream": "https://github.com/Rikorose/DeepFilterNet",
+  "tag": "v0.5.6",
+  "commit": "978576aa8400552a4ce9730838c635aa30db5e61",
+  "license": "MIT OR Apache-2.0",
+  "copied": [
+    "DeepFilterNet/",
+    "models/DeepFilterNet3.zip",
+    "LICENSE-MIT",
+    "LICENSE-APACHE"
+  ],
+  "files": {
+    "models/DeepFilterNet3.zip": {
+      "sha256": "49c52edc8947ae1f9bf50d81530beaf3a2c3245aeaf34b6f31ff535cd22284d2",
+      "size": 7986207
+    }
+  },
+  "patches": "PATCHES.md"
+}
