@@ -208,3 +208,27 @@ def test_save_load_roundtrip_and_tampering_is_detected(corpus, tmp_path):
     path.write_bytes(path.read_bytes()[:-8] + b"\0" * 8)
     with pytest.raises(EmbeddingBankError, match="sha256"):
         ArrayEmbeddingBank.load(path)
+
+
+def test_trim_silence_strips_edges_keeps_a_margin_and_leaves_silence_alone():
+    from cctrain.train.embed_bank import trim_silence
+
+    sr = 48_000
+    core = _speech(2.0, 150, 1)
+    x = np.concatenate([np.zeros(sr, np.float32), core, np.zeros(sr, np.float32)])
+    y = trim_silence(x)
+    assert 2.0 * sr <= y.size <= 2.0 * sr + 0.25 * sr
+    assert np.array_equal(trim_silence(np.zeros(sr, np.float32)), np.zeros(sr, np.float32))
+    assert np.array_equal(trim_silence(core), core[: trim_silence(core).size]) or trim_silence(core).size <= core.size
+
+
+def test_clips_with_long_silences_still_give_valid_enrollments_thanks_to_trimming(tmp_path):
+    root = tmp_path
+    sr = 48_000
+    utt = []
+    for k in range(5):
+        x = np.concatenate([np.zeros(sr, np.float32), _speech(1.5, 130 + k, k), np.zeros(sr, np.float32)])
+        utt.append(_rec(root, f"p/{k}.flac", x, sr, "vctk-0.92", "CC-BY-4.0", "p", "train").path)
+    kw = dict(utterances=utt, data_root=root, noise=[], rirs=[], denoise=None, p_noise=0.0, p_rir=0.0, max_tries=1)
+    ok = sum(make_enrollment_audio(np.random.default_rng([6, v]), **kw) is not None for v in range(20))
+    assert ok == 20

@@ -14,7 +14,6 @@ import argparse
 import json
 import sys
 import time
-from pathlib import Path
 
 import numpy as np
 
@@ -52,9 +51,9 @@ def save(name: str, obj: dict) -> None:
 
 
 def cmd_eer(a) -> None:
-    from cctrain.eval.wespeaker import WeSpeakerEvaluator, kaldi_fbank  # noqa: F401
     from cctrain.data.audio import load_audio
     from cctrain.data.resample import to_16k
+    from cctrain.eval.wespeaker import WeSpeakerEvaluator, kaldi_fbank  # noqa: F401
 
     result: dict = {"commit": git_commit(), "trials_lock": str(TRIALS_LOCK.relative_to(REPO)),
                     "caveat_cv": "cv_pt_heldout foi filtrado pelo próprio WeSpeaker (spec §4.6): o EER do WeSpeaker "

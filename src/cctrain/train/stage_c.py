@@ -48,7 +48,6 @@ from cctrain.gpu import gpu_lock
 from cctrain.losses.dfnet import stage_c_loss
 from cctrain.models.state_hash import state_dict_sha256
 from cctrain.paths import Paths
-from cctrain.train.embed_bank import ArrayEmbeddingBank, EmbeddingBank
 from cctrain.train.checkpoint import (
     Checkpoint,
     config_hash,
@@ -57,6 +56,7 @@ from cctrain.train.checkpoint import (
     restore_rng,
     save_checkpoint,
 )
+from cctrain.train.embed_bank import EmbeddingBank
 
 HOP = 480
 NYQUIST_HZ = 24_000.0

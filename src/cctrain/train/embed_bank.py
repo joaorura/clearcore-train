@@ -37,7 +37,7 @@ from cctrain.hashing import sha256_file
 
 EMB_DIM = 192
 OFFLINE_DELAY = 480  # a síntese do libdf atrasa 1 hop (medido no M0; igual a eval.functional.OFFLINE_DELAY)
-PIPELINE = ("concat 6-12 s (pausas 150-400 ms) -> RIR -> ruído -> denoise DFNet3 -> resampler-48k-16k-v1 -> "
+PIPELINE = ("trim de silêncio das bordas -> concat 6-12 s (pausas 150-400 ms) -> RIR -> ruído -> denoise DFNet3 -> resampler-48k-16k-v1 -> "
             "check_enrollment_audio")
 
 
@@ -111,10 +111,26 @@ def _load48(root: Path, rel: str) -> np.ndarray:
     return resample(x, sr, SR48)
 
 
+def trim_silence(x: np.ndarray, *, frame: int = 960, range_db: float = 35.0, floor_dbfs: float = -60.0,
+                 margin: int = 2_400) -> np.ndarray:
+    """Tira o silêncio das bordas (quadros de 20 ms abaixo de `range_db` do máximo ou do piso), com 50 ms de margem.
+    Gravações como o VCTK mic1 têm ~1 s de silêncio por fala: sem isso o enrollment reprova na fala ativa (< 60%).
+    Sinal sem quadro ativo volta intacto (a validação o recusa)."""
+    x = np.asarray(x, np.float32)
+    n = x.size // frame
+    if n == 0:
+        return x
+    level = 10 * np.log10(np.mean(x[: n * frame].astype(np.float64).reshape(n, frame) ** 2, axis=1) + 1e-12)
+    active = np.flatnonzero((level >= level.max() - range_db) & (level > floor_dbfs))
+    if active.size == 0:
+        return x
+    return x[max(0, active[0] * frame - margin) : min(x.size, (active[-1] + 1) * frame + margin)]
+
+
 def make_enrollment_audio(rng: np.random.Generator, *, utterances: Sequence[str], data_root: Path,
                           noise: Sequence[str], rirs: Sequence[str], denoise: Callable[[np.ndarray], np.ndarray] | None,
                           p_noise: float = 0.7, snr_db: tuple[float, float] = (0.0, 30.0), p_rir: float = 0.3,
-                          p_denoise: float = 0.5, max_tries: int = 6) -> np.ndarray | None:
+                          p_denoise: float = 0.5, max_tries: int = 8, trim: bool = True) -> np.ndarray | None:
     """Enrollment de 6-12 s a 16 kHz (float32) que passa em `check_enrollment_audio`, ou `None` se as `max_tries`
     tentativas forem recusadas. `denoise`: áudio 48 kHz -> 48 kHz alinhado (None desliga)."""
     if p_noise > 0 and not noise:
@@ -129,7 +145,7 @@ def make_enrollment_audio(rng: np.random.Generator, *, utterances: Sequence[str]
         parts, total, guard = [], 0, 0
         while total < n_want and guard < 4 * len(utterances) + 8:
             for k in rng.permutation(len(utterances)):
-                x = _load48(data_root, utterances[int(k)])
+                x = trim_silence(_load48(data_root, utterances[int(k)])) if trim else _load48(data_root, utterances[int(k)])
                 gap = np.zeros(int(rng.uniform(0.15, 0.40) * SR48), np.float32)
                 parts += [x, gap]
                 total += x.size + gap.size
@@ -232,7 +248,7 @@ def build_bank(encoder: Callable[[np.ndarray], np.ndarray], records: Sequence[Fi
     noise_p, rir_p = sorted(r.path for r in training_records(noise, sources)), sorted(
         r.path for r in training_records(rirs, sources))
     sig = _signature(variants=variants, seed=seed, p_noise=p_noise, snr_db=list(snr_db), p_rir=p_rir,
-                     p_denoise=p_denoise, encoder_tag=encoder_tag, denoise_tag=denoise_tag,
+                     p_denoise=p_denoise, pipeline=PIPELINE, encoder_tag=encoder_tag, denoise_tag=denoise_tag,
                      noise_sha=hashlib.sha256("\n".join(noise_p).encode()).hexdigest(),
                      rir_sha=hashlib.sha256("\n".join(rir_p).encode()).hexdigest())
     done: dict[str, np.ndarray] = {}
