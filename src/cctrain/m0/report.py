@@ -77,7 +77,10 @@ def render_markdown(ctx: Mapping) -> str:
     for heading, body in ctx["sections"]:
         lines += [f"## {heading}", "", body.rstrip(), ""]
     lines += ["## Go/no-go do orçamento (níveis de configs/m0/budget-v1.yaml)", "",
-              "| item | valor | limite | veredito |", "|---|---:|---:|---|"]
+              "| item | valor | limite | margem (limite - valor) | veredito |", "|---|---:|---:|---:|---|"]
     for r in ctx["go_no_go"]:
-        lines.append(f"| {r['item']} | {r['value']:.3f} | {r['limit']:.3f} | {r['verdict']} |")
+        lines.append(f"| {r['item']} | {r['value']:.3f} | {r['limit']:.3f} | {r['limit'] - r['value']:.3f} "
+                     f"| {r['verdict']} |")
+    if ctx.get("go_no_go_note"):
+        lines += ["", ctx["go_no_go_note"].rstrip()]
     return "\n".join(lines) + "\n"

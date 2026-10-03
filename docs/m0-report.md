@@ -2,27 +2,32 @@
 
 ## Resumo
 
-- disco: **go**
+- disco: **go** (margem 6.49 GB; ver as exclusões em "Go/no-go do orçamento")
 - vram_b16: **go**
 - ram_loader: **go**
 - tempo_t3: **go**
 - I1: **aprovado**; I2 (asset do repo): **aprovado**
 - B fixado: 4.0
 - Réplica do gating: paridade ok
-- ECAPA no tract: {'expand': True, 'broadcast': True}
+- ECAPA no tract (pooling): expand: aprovado; broadcast: aprovado
 
 ## Decisões do orquestrador
 
 - **Common Voice:** o Common Voice 27.0 pt (`cv27-pt`, filtro pt-BR "Portuguese (Brasil)" por metadado) substitui o
-  26.0: as versões são cumulativas e o 26.0 exigia termos separados.
+  26.0: as versões são cumulativas e o 26.0 exigia termos separados (decisão do orquestrador, não medido aqui).
 - **Ruído do piloto:** os 3 ruídos CC0 do Clearcore são split `test` (não treináveis). O ruído treinável do piloto é
-  sintético (`noise-synthetic-v1`, `LicenseRef-cctrain-generated`) e serve só para medir custo.
-- **Desvio emulação offline × runtime:** informativo no M0, sem gate (o `budget-v1` está congelado por SHA-256). O
-  valor medido (erro/sinal de -17,5 dB; 92,6% de concordância de estágio) alimenta a definição do gate antes do M2.
-- **RIR `synthetic-v1`:** RT60 efetivo de cerca de 0,1 a 0,6 s (cap de ordem 20), aceito no M0 porque o piloto mede
-  custo, não qualidade.
+  sintético (`noise-synthetic-v1`, `LicenseRef-cctrain-generated`) e serve só para medir custo (decisão do
+  orquestrador, não medido aqui).
+- **Desvio emulação offline × runtime:** informativo no M0, sem gate (o `budget-v1` está congelado por SHA-256). Valores
+  medidos em `offline_vs_runtime.json`: erro/sinal de -17,5 dB e
+  92,6% de concordância de estágio (silêncio fora da conta:
+  3,8% dos quadros). Alimenta a definição do gate antes do M2.
+- **RIR `synthetic-v1`:** RT60 medido de 0,10 a 0,61 s (mediana
+  0,38 s) em 64 RIR do piloto, com `max_order` limitado a
+  20 (lido de `rir-synthetic-v1-pilot.params.jsonl`). A cauda longa não existe: aceito no M0
+  porque o piloto mede custo, não qualidade (decisão do orquestrador).
 - **Mistura:** convenção de SNR (ruído escalado contra alvo + interferente) e alvo seco não alinhado à RIR aceitos no
-  M0, a conferir contra a spec §4.4.
+  M0, a conferir contra a spec §4.4 (decisão do orquestrador, não medido aqui).
 - **Splits e loader:** `training_records` recusa `test`/`dev`; o loader tem `allowed_splits`.
 - **Go/no-go:** segue estritamente os níveis congelados de `configs/m0/budget-v1.yaml` (verificados por SHA-256);
   nenhum nível foi ajustado depois das medições.
@@ -37,8 +42,7 @@
   "gpu": "NVIDIA RTX PRO 1000 Blackwell Generation Laptop GPU",
   "ram_total_gb": 30.790889739990234,
   "ram_available_gb": 3.9514808654785156,
-  "swap_used_gb": 44.731407165527344,
-  "nvidia_smi_q_head": "\n==============NVSMI LOG==============\n\nTimestamp                                              : Sat Oct  3 09:34:07 2026\nDriver Version                                         : 615.71.09 [Deprecated; will be removed in CUDA 14.0. Use KMD Version instead]\nCUDA Version                                           : 13.4 [Deprecated; will be removed in CUDA 14.0. Use CUDA UMD Version instead]\nKMD Version                                            : 615.71.09\nCUDA UMD Version                                       : 13.4\n\nAttached GPUs                                          : 1\nGPU 00000000:01:00.0\n    Product Name                                       : NVIDIA RTX PRO 1000 Blackwell Generation Laptop GPU\n    Product Brand                                      : NVIDIA RTX\n    Product Architecture                               : Blackwell\n    Display Mode                                       : Requested functionality has been deprecated\n    Display Attached                                   : No\n    Display Active                                     : Disabled\n    Persistence Mode                                   : Disabled\n    Addressing Mode                                    : HMM\n    MIG Mode\n        Current                                        : N/A\n        Pending                                        : N/A\n    Accounting Mode                                    : Disabled\n    Accounting Mode Buffer Size                        : 4000\n    Driver Model\n        Current                                        : N/A\n        Pending                                        : N/A\n    Serial Number                                      : 0\n    GPU UUID                                           : GPU-10e70321-28b3-6efc-ab81-59466a5191a2\n    GPU PDI                                            : 0xf12278c5bcf48e86\n    Minor Number                                       : 0\n    VBIOS Version                                      : 98.07.1C.40.1B\n    MultiGPU Board                                     : No\n    Board ID                                           : 0x100\n    Board Part Number                                  : N/A\n    GPU Part Number                                    : 2DB8-975-A1\n    FRU Part Number                                    : N/A\n    Platform Info\n        Chassis Serial Number                          : \n        Slot Number                                    : 0\n        Tray Index                                     : 0\n        Host ID                                        : 1\n        Peer Type                                      : Direct Connected\n        Module Id                                      : 1\n        GPU Fabric GUID                                : 0x0000000000000000\n    Inforom Version\n        Image Version                                  : G005.0000.98.01\n        OEM Object                                     : 2.1\n        ECC Object                                     : N/A\n        Power Management Object                        : N/A\n    Inforom BBX Object Flush\n        Latest Timestamp                               : N/A\n        Latest Duration                                : N/A\n    Inforom Time Data\n        Time Run                                       : N/A\n    GPU Operation Mode\n        Current                                        : N/A\n        Pending                                        : N/A\n    GPU C2C Mode                                       : Disabled\n    GPU Virtualization Mode\n        Virtualization Mode                            : None\n        Host VGPU Mode                                 : N/A\n        vGPU Heterogeneous Mode                        : N/A\n    GPU Recovery Action                                : None\n    GSP Firmware Version                               : 615.71.09\n    IBMNPU\n        Relaxed Ordering Mode                          : N/A\n    PCI\n        Bus                                            : 0x01\n        Device                                        "
+  "swap_used_gb": 44.731407165527344
 }
 ```
 
@@ -350,7 +354,6 @@
         }
       }
     },
-    "tract_check_target_root": "/home/joaorura/orca/projects/clearcore-train",
     "rir": {
       "count": 64,
       "stored_bytes": 2467385
@@ -420,7 +423,8 @@
     },
     "total_gb": 50.60202487250599
   },
-  "livre_mais_ja_usado_gb": 66.793386613
+  "livre_mais_ja_usado_gb": 67.092869749,
+  "ja_usado_gb": 9.012511349
 }
 ```
 
@@ -537,6 +541,14 @@
 }
 ```
 
+## Limitações das medições
+
+- **Perda proxy e professor stand-in:** o passo de GPU mede o custo com uma perda proxy, não a perda real do `df/loss.py`, e o professor é um stand-in; s/passo e VRAM com professor são ordem de grandeza (a perda real e o professor real entram no M2).
+- **Sem estabilização térmica:** 20 passos por configuração, curtos demais para o estado estacionário; temperatura máxima observada 57 C em B32.
+- **Throttle:** razões não nulas de throttle em todas as medições (0x0000000000000004, 0x0000000000000400); `min_sm_clock` de 1170 MHz em B32 contra 2077 MHz em B16 sem professor (1912 MHz em B16 com professor): s/passo em B32 pode estar inflado.
+- **Memória do host:** durante as medições havia 3.95 GB de RAM disponível (de 30.8 GB) e 44.7 GB de swap em uso; isso pode afetar a vazão do loader.
+- **Loader:** medido com o ruído sintético do piloto, pequeno o bastante para caber no page cache; a vazão de 215 amostras/s e o RSS de 2.39 GB não valem para dados de treino reais maiores que a RAM.
+
 ## Pendências
 
 - CV 27.0 pt: manifest `cv27-pt.jsonl` presente
@@ -554,6 +566,8 @@ Pendências **obrigatórias do M1** (o plano do M1 deve começar por elas):
 4. Definir o gate para o desvio emulação offline × runtime antes do M2.
 5. Publicar o commit `70dc85c` do Clearcore: a dependência git do `tract-check` está pinada nele.
 6. Triagem dos *deferred minors* do ledger (lista abaixo).
+7. Re-projetar o disco incluindo o que o M0 deixou fora da projeção (RIR `synthetic-v2` com cauda longa, ambiente
+   `export` do M3, DNS5 dev do G8, pico transitório de download/extração do CV27 e do FSD50K) antes do M1.
 
 O que cada marco seguinte consome deste relatório está nos "Próximos planos" do plano bootstrap + M0 (M1: pooling que
 passou no tract, parâmetros do fbank, fatores FLAC por SR e vazão do loader; M2: B fixado, s/passo e VRAM, desvio
@@ -580,9 +594,18 @@ offline × runtime; M3: asset reproduzível e I2; M4: réplica do gating e proje
 
 ## Go/no-go do orçamento (níveis de configs/m0/budget-v1.yaml)
 
-| item | valor | limite | veredito |
-|---|---:|---:|---|
-| disco | 50.602 | 56.793 | go |
-| vram_b16 | 4.355 | 7.000 | go |
-| ram_loader | 2.391 | 6.000 | go |
-| tempo_t3 | 10.633 | 35.000 | go |
+| item | valor | limite | margem (limite - valor) | veredito |
+|---|---:|---:|---:|---|
+| disco | 50.602 | 57.093 | 6.491 | go |
+| vram_b16 | 4.355 | 7.000 | 2.645 | go |
+| ram_loader | 2.391 | 6.000 | 3.609 | go |
+| tempo_t3 | 10.633 | 35.000 | 24.367 | go |
+
+O veredito de disco (**go**) tem margem de 6.49 GB (limite 57.09 GB menos projeção 50.60 GB), já descontada a reserva de 10 GB. **Não estão na projeção:**
+
+- RIR `synthetic-v2` com cauda longa (a projeção conta as 10 000 RIR do `synthetic-v1`, curtas)
+- ambiente `export` do M3 (Python 3.10, torch 1.13.1)
+- DNS5 dev do G8
+- pico transitório de download/extração do CV27 e do FSD50K (arquivos comprimidos e extraídos coexistem)
+
+Por isso o go de disco é condicional: re-projetar o disco incluindo esses itens antes do M1.

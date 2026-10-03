@@ -36,3 +36,11 @@ def test_no_personal_path_in_sources():
     home = str(Path.home())
     for f in (repo_root() / "src").rglob("*.py"):
         assert home not in f.read_text(), f"caminho pessoal em {f}"
+
+
+def test_no_personal_path_in_docs():
+    home = str(Path.home())
+    docs = list((repo_root() / "docs").rglob("*.md"))
+    assert docs, "docs/ sem relatório para varrer"
+    for f in docs:
+        assert home not in f.read_text(), f"caminho pessoal em {f}"
