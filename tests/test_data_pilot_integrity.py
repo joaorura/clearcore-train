@@ -2,7 +2,14 @@ from collections import Counter
 
 import pytest
 
-from cctrain.data.manifest import FILES_DIR, load_sources, read_file_manifest, training_records
+from cctrain.data.manifest import (
+    FILES_DIR,
+    NON_TRAIN_SPLITS,
+    ManifestError,
+    load_sources,
+    read_file_manifest,
+    training_records,
+)
 from cctrain.data.pilot import PILOT_MANIFESTS, VCTK_TEST_FILES
 from cctrain.hashing import sha256_file
 
@@ -15,8 +22,20 @@ def test_every_record_matches_its_file(paths, source_id):
     assert records, source_id
     for r in records:
         assert sha256_file(paths.data / r.path) == r.sha256, r.path
-    allowed = [r for r in records if r.role == "train"]
+    allowed = [r for r in records if r.split not in NON_TRAIN_SPLITS]
     assert training_records(allowed, load_sources()) == allowed
+    for r in records:
+        if r.split in NON_TRAIN_SPLITS:
+            with pytest.raises(ManifestError, match="dev/teste"):
+                training_records([r], load_sources())
+
+
+def test_test_and_dev_material_is_labelled_as_such():
+    vctk = read_file_manifest(PILOT_MANIFESTS["vctk-0.92"])
+    assert {r.speaker for r in vctk if r.split == "test"} == {"p225", "p226"}
+    assert not {r.speaker for r in vctk if r.split == "pilot"} & {"p225", "p226"}
+    assert {r.split for r in read_file_manifest(PILOT_MANIFESTS["librispeech-dev-clean"])} == {"dev"}
+    assert {r.split for r in read_file_manifest(PILOT_MANIFESTS["noise-wikimedia-cc0"])} == {"test"}
 
 
 def test_pilot_amounts():

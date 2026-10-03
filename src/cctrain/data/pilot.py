@@ -1,7 +1,7 @@
 """Dados do piloto do M0 (spec §9.2): ~1 h para medir, nunca para treinar.
 
 VCTK por HTTP Range (8 falantes x 50 falas mic1 + as 6 amostras de teste do Clearcore), LibriSpeech
-dev-clean inteiro (stream do tar.gz; o loader usa um subconjunto), os 3 ruídos CC0 dos testes do Clearcore
+dev-clean inteiro (stream do tar.gz; split `dev` oficial, nunca treino, spec §4.5), os 3 ruídos CC0 dos testes do Clearcore
 (split test) e, se o dono tiver baixado, o Common Voice 27.0 pt (apenas a variante pt-BR; manifest por arquivo
 com client_id fora do git).
 """
@@ -178,7 +178,7 @@ def fetch_librispeech(paths: Paths) -> list[FileRecord]:
         raise ManifestError("LibriSpeech: LICENSE.TXT ausente no tar")
     check_license_text((out_dir / lic).read_text(errors="replace"), "LibriSpeech LICENSE.TXT")
     records = [record_for_audio(out_dir / f, paths.data, source=src, speaker=PurePosixPath(f).parts[1],
-                                split="pilot", codec="flac") for f in files if f.endswith(".flac")]
+                                split="dev", codec="flac") for f in files if f.endswith(".flac")]
     write_file_manifest(records, PILOT_MANIFESTS["librispeech-dev-clean"])
     return records
 

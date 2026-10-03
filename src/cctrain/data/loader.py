@@ -18,6 +18,7 @@ from cctrain.data.audio import load_audio, resample
 from cctrain.data.features import SR, analysis, extract_features
 from cctrain.data.manifest import (
     FILES_DIR,
+    TRAIN_SPLITS,
     FileRecord,
     SourceManifest,
     load_sources,
@@ -47,12 +48,14 @@ class PilotLoaderConfig:
 class PilotMixDataset(IterableDataset):
     def __init__(self, speech: Sequence[FileRecord], noise: Sequence[FileRecord], rirs: Sequence[FileRecord],
                  data_root: Path, cfg: PilotLoaderConfig | None = None,
-                 sources: Mapping[str, SourceManifest] | None = None):
+                 sources: Mapping[str, SourceManifest] | None = None,
+                 allowed_splits: Sequence[str] = TRAIN_SPLITS):
         super().__init__()
         sources = sources or load_sources()
-        self.speech = training_records(speech, sources)
-        self.noise = training_records(noise, sources)
-        self.rirs = training_records(rirs, sources)
+        allowed = frozenset(allowed_splits)
+        self.speech = training_records([r for r in speech if r.split in allowed], sources)
+        self.noise = training_records([r for r in noise if r.split in allowed], sources)
+        self.rirs = training_records([r for r in rirs if r.split in allowed], sources)
         self.by_speaker: dict[str, list[FileRecord]] = defaultdict(list)
         for r in self.speech:
             self.by_speaker[r.speaker].append(r)
@@ -106,14 +109,21 @@ class PilotMixDataset(IterableDataset):
             yield self._sample(rng)
 
 
-def pilot_records(data_root: Path, librispeech_speakers: int = 20) -> tuple[list[FileRecord], list[FileRecord], list[FileRecord]]:
-    vctk = [r for r in read_file_manifest(FILES_DIR / "vctk-0.92-pilot.jsonl") if r.split == "pilot"]
-    libri = read_file_manifest(FILES_DIR / "librispeech-dev-clean-pilot.jsonl")
+def pilot_records(data_root: Path, librispeech_speakers: int = 20, allowed_splits: Sequence[str] = TRAIN_SPLITS
+                  ) -> tuple[list[FileRecord], list[FileRecord], list[FileRecord]]:
+    """Registros do piloto já filtrados por `allowed_splits` (dev/teste nunca entram; spec §4.5)."""
+    allowed = frozenset(allowed_splits)
+
+    def read(path: Path) -> list[FileRecord]:
+        return [r for r in read_file_manifest(path) if r.split in allowed]
+
+    vctk = read(FILES_DIR / "vctk-0.92-pilot.jsonl")
+    libri = read(FILES_DIR / "librispeech-dev-clean-pilot.jsonl")
     keep = sorted({r.speaker for r in libri})[:librispeech_speakers]
     speech = vctk + [r for r in libri if r.speaker in keep]
     cv_manifest = Path(data_root) / "manifests" / "cv27-pt.jsonl"
     if cv_manifest.is_file():
-        speech += read_file_manifest(cv_manifest)
-    noise = read_file_manifest(FILES_DIR / "noise-wikimedia-cc0-pilot.jsonl")
-    rirs = read_file_manifest(FILES_DIR / "rir-synthetic-v1-pilot.jsonl")
+        speech += read(cv_manifest)
+    noise = read(FILES_DIR / "noise-wikimedia-cc0-pilot.jsonl")
+    rirs = read(FILES_DIR / "rir-synthetic-v1-pilot.jsonl")
     return speech, noise, rirs

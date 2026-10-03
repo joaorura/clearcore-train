@@ -133,3 +133,10 @@ def test_lock_refuses_hash_change(tmp_path: Path):
     with pytest.raises(ManifestError, match="mudou"):
         update_lock("s", "a.tar.gz", "b" * 64, 10, lock_path=lock)
     assert json.loads(lock.read_text())["s"]["a.tar.gz"]["sha256"] == SHA
+
+
+@pytest.mark.parametrize("split", ["test", "dev"])
+def test_training_records_refuse_dev_and_test_splits(split):
+    with pytest.raises(ManifestError, match="dev/teste"):
+        training_records([_rec(split=split)], load_sources())
+    assert training_records([_rec(split="pilot")], load_sources())
