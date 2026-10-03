@@ -1,0 +1,34 @@
+# Avaliador independente do M1 (plano M1 Tarefa 9): WeSpeaker ResNet34, ONNX oficial, rodado local com onnxruntime.
+# Nunca entra no pacote de entrega nem no treino: é só ferramenta de avaliação e de filtro do Common Voice (spec §4.6).
+id: wespeaker-voxceleb-resnet34
+name: "WeSpeaker ResNet34 (VoxCeleb), wespeaker-voxceleb-resnet34"
+repo: Wespeaker/wespeaker-voxceleb-resnet34
+landing_page: "https://huggingface.co/Wespeaker/wespeaker-voxceleb-resnet34"
+revision: ff1ac5bca8ef11e90662b879aa923979e0bd277b
+license: Apache-2.0
+license_evidence: >-
+  Front matter do README.md do repositório HF na revisão fixada (sha256 abaixo): license: apache-2.0; API
+  /api/models: cardData.license = apache-2.0, tag license:apache-2.0. Não é a variante -LM (essa é CC BY 4.0).
+role: tool_only
+training_data: "VoxCeleb2 dev (config.yaml: data/vox2_dev; 17.982 classes); direitos de áudio ficam com os donos dos vídeos"
+paper: "arXiv:2210.17016"
+architecture:
+  family: "ResNet34, pooling TSTP, embedding de 256 dimensões"
+  onnx_input: "feats [B, T, 80]: fbank Kaldi (80 mels, 25/10 ms, dither 0, amostras em escala int16) com CMN por enunciado"
+  onnx_output: "embs [B, 256]"
+  opset: 14
+  ir_version: 7
+base_url: "https://huggingface.co/Wespeaker/wespeaker-voxceleb-resnet34/resolve/ff1ac5bca8ef11e90662b879aa923979e0bd277b"
+files:
+  voxceleb_resnet34.onnx:
+    sha256: 9fea6516d7ad6bf0a76c7689f5a49b65d330fad6dde96c91bb4435ffbfe056a1
+    size: 26534127
+    used: true   # x-linked-etag do HF (LFS sha256) confere com o arquivo baixado
+  config.yaml:
+    sha256: 10d328c36178263b787ded901d9290ead35124f876edba7e78bbf423208496f5
+    size: 1536
+    used: true   # parâmetros do fbank (num_mel_bins 80, frame_length 25, frame_shift 10) e proveniência dos dados
+  README.md:
+    sha256: 4bcf87ecfbbb8e07a01b21415a970c8b53a5283bf6872b657040d3f45c9241f7
+    size: 31
+    used: false  # evidência da licença
