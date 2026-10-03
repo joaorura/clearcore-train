@@ -1,0 +1,64 @@
+# Checkpoint pré-treinado portado para o encoder do enrollment (M1 Tarefa 10).
+id: spkrec-ecapa-voxceleb
+name: "SpeechBrain ECAPA-TDNN (VoxCeleb), spkrec-ecapa-voxceleb"
+repo: speechbrain/spkrec-ecapa-voxceleb
+landing_page: "https://huggingface.co/speechbrain/spkrec-ecapa-voxceleb"
+revision: 0f99f2d0ebe89ac095bcc5903c4dd8f72b367286
+license: Apache-2.0
+license_evidence: >-
+  Metadados do repositório HF na revisão fixada (API /api/models e front matter do README.md, sha256 abaixo):
+  license: "apache-2.0", tag license:apache-2.0. O repositório não traz arquivo LICENSE separado.
+training_data: "VoxCeleb1 + VoxCeleb2 (research purposes; direitos de áudio ficam com os donos dos vídeos)"
+paper: "arXiv:2106.04624"
+architecture:
+  n_mels: 80
+  channels: [1024, 1024, 1024, 1024, 3072]
+  kernel_sizes: [5, 3, 3, 3, 1]
+  dilations: [1, 2, 3, 4, 1]
+  attention_channels: 128
+  lin_neurons: 192
+  frontend: "Fbank(n_mels 80, n_fft 400, hamming 25 ms, hop 10 ms, f 0-8000 Hz, top_db 80) + InputNormalization(sentence, std_norm False)"
+base_url: "https://huggingface.co/speechbrain/spkrec-ecapa-voxceleb/resolve/0f99f2d0ebe89ac095bcc5903c4dd8f72b367286"
+files:
+  embedding_model.ckpt:
+    sha256: 0575cb64845e6b9a10db9bcb74d5ac32b326b8dc90352671d345e2ee3d0126a2
+    size: 83316686
+    used: true   # state_dict do encoder (20.805.983 parâmetros e buffers de BN)
+  hyperparams.yaml:
+    sha256: 6f78854fa04ba59e761437b76a2575d3aba5e5016de3e9b69f0c9a5077fb1a41
+    size: 1919
+    used: true   # hiperparâmetros conferidos contra architecture acima
+  README.md:
+    sha256: 00f58c3cbd7a7510de9374080da0e82a4c4e8f4df567f7338fe6efe108be705a
+    size: 5377
+    used: false  # evidência da licença
+  example1.wav:
+    sha256: bf2dde5cb516939ff619d62fc07d4f4bec5b5d521aee3d07ae51828c9d93be0b
+    size: 104390
+    used: false  # só para vetores de referência de fala real (não versionado; ver tests/golden)
+  example2.flac:
+    sha256: 0bf6c0ab8a2a9e8cbf89486c33aab80b608a5033d72214436e0557e085484bc9
+    size: 39589
+    used: false
+  classifier.ckpt:
+    sha256: fd9e3634fe68bd0a427c95e354c0c677374f62b3f434e45b78599950d860d535
+    size: 5534328
+    used: false  # só o `from_hparams` do SpeechBrain precisa dele ao gerar os vetores de referência
+  mean_var_norm_emb.ckpt:
+    sha256: cd70225b05b37be64fc5a95e24395d804231d43f74b2e1e5a513db7b69b34c33
+    size: 1921
+    used: false  # idem (normalização de embedding, não usada por encode_batch)
+  label_encoder.txt:
+    sha256: e13c3a167bb4112685670ee896d20e2b565af16b3a4ceeaa8689fa4d22adb8b9
+    size: 128619
+    used: false  # idem
+  config.json:
+    sha256: 15ff7afad09adec0936c31493a7397c13f855914f4579a8393fe82649778a664
+    size: 51
+    used: false
+derived_asset:
+  name: enrollment.onnx
+  weight_license: CC-BY-NC-4.0
+  notice: >-
+    Encoder derivado dos pesos SpeechBrain ECAPA (Apache-2.0, repo e revisão acima), treinados em VoxCeleb1/2
+    ("research purposes"). O asset de enrollment é de uso não comercial (CC BY-NC 4.0 + NOTICE).
