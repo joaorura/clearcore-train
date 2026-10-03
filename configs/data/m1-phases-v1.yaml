@@ -1,0 +1,54 @@
+# Fases de download do M1 e projeção de disco (plano M1 Tarefa 7). GB decimais (1 GB = 10^9 B).
+# Fatores GB/h: medidos no M0 (docs/m0-report.md, "Disco"), exceto onde marcado "interpolado".
+# Ordem fixada; tar grandes só em stream (transient_gb 0). Uma fase com margem acumulada < 0 (no fim ou no pico)
+# é marcada blocked_disk por cctrain.m1.disk_plan.
+version: 1
+spec: "Plano M1, Tarefa 7; decisão do dono de 2026-10-03: encoder = SpeechBrain ECAPA pré-treinado"
+
+# Já contado na projeção do M0 mas ainda fora do disco, mais o ambiente de export do M3 (não estava na projeção).
+baseline:
+  - {id: evaluators_whisper_dnsmos, gb: 3.0, basis: "estimativa da projeção do M0"}
+  - {id: test_sets, gb: 3.0, basis: "estimativa da projeção do M0"}
+  - {id: prerendered_dev_test, gb: 3.0, basis: "estimativa da projeção do M0"}
+  - {id: runs_checkpoints, gb: 2.0, basis: "estimativa da projeção do M0"}
+  - {id: export_env_py310_torch1131, gb: 2.0, basis: "estimativa: torch 1.13.1 CPU + onnx no Python 3.10 (M3); não estava na projeção do M0"}
+
+phases:
+  - id: 1-noise-rir-encoder
+    sources:
+      - {id: dns-noise-fullband-cc0, hours: 10.0, sr: 48000, factor_gb_per_hour: 0.16719104090598327,
+         transient_gb: 3.0, basis: "fator de ruído 48 kHz medido; ~3 GB de blocos brutos da fatia (R04 §5)"}
+      - {id: fsd50k-eval-cc0-ccby, hours: 15.0, sr: 44100, factor_gb_per_hour: 0.1456633340081493,
+         transient_gb: 6.2, basis: "fator interpolado (M0); o eval é zip partido de 6,2 GB, sem leitura em stream"}
+      - {id: rir-synthetic-v2, gb_final: 1.05, transient_gb: 0.0,
+         basis: "teto: 10.000 RIR x 1,2 s (limite do comprimento) x 87.316 B/s de FLAC medido nas RIR do v1"}
+      - {id: speechbrain-ecapa-voxceleb, gb_final: 0.08, transient_gb: 0.0,
+         basis: "checkpoint do SpeechBrain ECAPA pré-treinado (~80 MB), decisão do dono"}
+  - id: 2-vctk
+    sources:
+      - {id: vctk-0.92-mic1, hours: 44.0, sr: 48000, factor_gb_per_hour: 0.1632062417379781, transient_gb: 0.0,
+         basis: "fator VCTK medido; zip de 10,94 GB lido por Range, só os membros mic1 (pico ~ 0)"}
+  - id: 3-librispeech-100-test-clean
+    sources:
+      - {id: librispeech-train-clean-100, hours: 100.6, sr: 16000, factor_gb_per_hour: 0.06663824839304526,
+         transient_gb: 0.0, basis: "fator LibriSpeech medido; tar.gz de 6,3 GB em stream"}
+      - {id: librispeech-test-clean, hours: 5.4, sr: 16000, factor_gb_per_hour: 0.06663824839304526,
+         transient_gb: 0.0, basis: "fator LibriSpeech medido; tar.gz em stream (avaliação, G-EER)"}
+  - id: 4-cml-tts-pt
+    sources:
+      - {id: cml-tts-pt-cap30h, hours: 30.0, sr: 24000, factor_gb_per_hour: 0.09078024672927847, transient_gb: 0.0,
+         basis: "fator interpolado (M0); tar.bz de 9,7 GB em stream, teto de 30 h"}
+  - id: 5-cv27-pt
+    sources:
+      - {id: cv27-pt-complete, gb_final: 5.209825417, transient_gb: 0.0,
+         basis: "completo: MP3 já comprimido, extraído ~ tamanho do tar.gz baixado (5.209.825.417 B); lido em stream do arquivo local"}
+
+# Fora do escopo por decisão do dono (2026-10-03): o encoder é o SpeechBrain ECAPA pré-treinado, sem treino próprio.
+# Custariam o que está em gb_final se fossem agendados (LibriSpeech: fator medido x horas).
+excluded_by_owner:
+  - {id: librispeech-train-clean-360, hours: 360.0, gb_final: 23.99, basis: "360 h x 0,06664 GB/h"}
+  - {id: librispeech-train-other-500, hours: 500.0, gb_final: 33.32, basis: "500 h x 0,06664 GB/h"}
+  - {id: mls-pt, hours: 168.3, gb_final: 2.5, basis: "versão opus em stream (2,5 GB); em FLAC seriam ~9,3 GB"}
+
+out_of_scope:
+  - {id: dns5-dev-g8, basis: "DNS5 dev (G8) fica fora do M1"}
