@@ -23,6 +23,16 @@ def test_disk_projection_uses_measured_factors_and_flags_interpolation():
     assert p["total_gb"] == pytest.approx(sum(r["gb"] for r in p["rows"]) + 7.0 + 3.0 + 1.5 + 2.0)
 
 
+def test_speech_uses_per_source_factor_when_available():
+    disk = {**DISK, "by_source": {"vctk-0.92": {"48000": {"flac_gb_per_hour": 0.16}},
+                                  "librispeech-dev-clean": {"16000": {"flac_gb_per_hour": 0.05}},
+                                  "noise-synthetic-v1": {"48000": {"flac_gb_per_hour": 0.24}}}}
+    rows = {r["id"]: r for r in project_disk(MINIMAL, disk)["rows"]}
+    assert rows["a"]["gb"] == pytest.approx(1.6)
+    assert rows["b"]["gb"] == pytest.approx(10 * (0.05 + (24000 - 16000) / 32000 * 0.11))
+    assert rows["n"]["gb"] == pytest.approx(0.06)
+
+
 def test_t3_projection_formula():
     t3 = {"epochs": 20, "hours_audio_per_epoch": 100.0, "segment_s": 3.0, "batch": 16}
     assert t3_hours(t3, 0.5) == pytest.approx(20 * (100 * 3600 / 3) / 16 * 0.5 / 3600)

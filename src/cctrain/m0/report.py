@@ -7,10 +7,19 @@ from collections.abc import Mapping
 from cctrain.eval.gates import Budget
 
 GB = 1e9
+SPEECH_SOURCES = ("vctk-0.92", "librispeech-dev-clean")
 
 
-def _factor(disk: Mapping, sr: int) -> tuple[float, str]:
-    by_sr = {int(k): v["flac_gb_per_hour"] for k, v in disk["by_sr"].items()}
+def _speech_by_sr(disk: Mapping) -> dict[int, float]:
+    """Fator FLAC de fala por SR vindo das fontes de fala medidas; sem recorte por fonte, cai no agregado por SR."""
+    by_source = disk.get("by_source") or {}
+    out = {int(sr): v["flac_gb_per_hour"] for src in SPEECH_SOURCES for sr, v in by_source.get(src, {}).items()}
+    return out or {int(k): v["flac_gb_per_hour"] for k, v in disk["by_sr"].items()}
+
+
+def _factor(disk: Mapping, sr: int, by_sr: Mapping[int, float] | None = None) -> tuple[float, str]:
+    if by_sr is None:
+        by_sr = {int(k): v["flac_gb_per_hour"] for k, v in disk["by_sr"].items()}
     if sr in by_sr:
         return by_sr[sr], "medido"
     lower = max((s for s in by_sr if s < sr), default=min(by_sr))
@@ -23,12 +32,13 @@ def _factor(disk: Mapping, sr: int) -> tuple[float, str]:
 
 def project_disk(minimal: Mapping, disk: Mapping) -> dict:
     rows = []
+    speech_by_sr = _speech_by_sr(disk)
     for group in ("speech", "noise"):
         for item in minimal[group]:
             if "fixed_gb" in item:
                 rows.append({"id": item["id"], "gb": float(item["fixed_gb"]), "factor_source": "fixo (pesquisa)"})
                 continue
-            factor, source = _factor(disk, int(item["sr"]))
+            factor, source = _factor(disk, int(item["sr"]), speech_by_sr if group == "speech" else None)
             rows.append({"id": item["id"], "gb": item["hours"] * factor, "factor_source": source})
     rir = disk["rir"]
     per_rir = rir["stored_bytes"] / max(rir["count"], 1)

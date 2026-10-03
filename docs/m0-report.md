@@ -184,6 +184,8 @@
   "max_abs_diff": 0.3279372453689575,
   "error_to_signal_db": -17.539694196709547,
   "stage_agreement": 0.9260416666666667,
+  "stage_agreement_frames": 960,
+  "silent_fraction_excluded": 0.038076152304609256,
   "offline_stage_fractions": {
     "zero": 0.254,
     "erb_only": 0.057,
@@ -258,34 +260,125 @@
         "stored_gb_per_hour": 0.1676717370108773
       }
     },
+    "by_source": {
+      "cv27-pt": {
+        "32000": {
+          "files": 1547,
+          "hours": 2.0011799999999993,
+          "pcm16_bytes": 461071872,
+          "flac_bytes": 157837556,
+          "stored_bytes": 43303906,
+          "codecs": [
+            "mp3"
+          ],
+          "flac_over_pcm16": 0.34232744521010383,
+          "flac_gb_per_hour": 0.07887224337640794,
+          "stored_gb_per_hour": 0.021639185880330616
+        },
+        "48000": {
+          "files": 15,
+          "hours": 0.018313333333333334,
+          "pcm16_bytes": 6329088,
+          "flac_bytes": 1677104,
+          "stored_bytes": 528099,
+          "codecs": [
+            "mp3"
+          ],
+          "flac_over_pcm16": 0.26498351737248715,
+          "flac_gb_per_hour": 0.09157830360393156,
+          "stored_gb_per_hour": 0.028836858390971967
+        }
+      },
+      "librispeech-dev-clean": {
+        "16000": {
+          "files": 2703,
+          "hours": 5.387811319444447,
+          "pcm16_bytes": 620675864,
+          "flac_bytes": 359034309,
+          "stored_bytes": 359034309,
+          "codecs": [
+            "flac"
+          ],
+          "flac_over_pcm16": 0.5784570173007404,
+          "flac_gb_per_hour": 0.06663824839304526,
+          "stored_gb_per_hour": 0.06663824839304526
+        }
+      },
+      "noise-synthetic-v1": {
+        "48000": {
+          "files": 16,
+          "hours": 0.044444444444444446,
+          "pcm16_bytes": 15360000,
+          "flac_bytes": 10709720,
+          "stored_bytes": 10709720,
+          "codecs": [
+            "flac"
+          ],
+          "flac_over_pcm16": 0.6972473958333333,
+          "flac_gb_per_hour": 0.2409687,
+          "stored_gb_per_hour": 0.2409687
+        }
+      },
+      "noise-wikimedia-cc0": {
+        "48000": {
+          "files": 3,
+          "hours": 0.008333449074074075,
+          "pcm16_bytes": 2880040,
+          "flac_bytes": 1460477,
+          "stored_bytes": 2880274,
+          "codecs": [
+            "wav"
+          ],
+          "flac_over_pcm16": 0.5071030263468563,
+          "flac_gb_per_hour": 0.17525480590547352,
+          "stored_gb_per_hour": 0.34562807961000536
+        }
+      },
+      "vctk-0.92": {
+        "48000": {
+          "files": 406,
+          "hours": 0.49224181712962994,
+          "pcm16_bytes": 170118772,
+          "flac_bytes": 80336937,
+          "stored_bytes": 80336937,
+          "codecs": [
+            "flac"
+          ],
+          "flac_over_pcm16": 0.4722402828066499,
+          "flac_gb_per_hour": 0.1632062417379781,
+          "stored_gb_per_hour": 0.1632062417379781
+        }
+      }
+    },
+    "tract_check_target_root": "/home/joaorura/orca/projects/clearcore-train",
     "rir": {
       "count": 64,
       "stored_bytes": 2467385
     },
     "dirs_bytes": {
-      "venv": 7301764677,
-      "tract_check_target": null,
+      "venv": 7301766861,
+      "tract_check_target": 577054505,
       "rustup": 623763680,
       "data": 509926303,
-      "third_party": 8450813
+      "third_party": 8667869
     },
-    "free_bytes": 58140741632
+    "free_bytes": 57973571584
   },
   "projecao": {
     "rows": [
       {
         "id": "vctk-0.92-mic1",
-        "gb": 7.356405799863264,
+        "gb": 7.1810746364710365,
         "factor_source": "medido"
       },
       {
         "id": "tts-portuguese",
-        "gb": 1.7555059295128244,
+        "gb": 1.71366553824877,
         "factor_source": "medido"
       },
       {
         "id": "cml-tts-pt-cap30h",
-        "gb": 2.1826573765417976,
+        "gb": 2.723407401878354,
         "factor_source": "interpolado"
       },
       {
@@ -315,8 +408,8 @@
       }
     ],
     "measured_gb": {
-      "venv": 7.301764677,
-      "tract_check_target": 0.0,
+      "venv": 7.301766861,
+      "tract_check_target": 0.577054505,
       "rustup": 0.62376368
     },
     "estimated_gb": {
@@ -325,9 +418,9 @@
       "prerendered_dev_test": 3.0,
       "runs_checkpoints": 2.0
     },
-    "total_gb": 49.701389712825716
+    "total_gb": 50.60202487250599
   },
-  "livre_mais_ja_usado_gb": 66.423374532
+  "livre_mais_ja_usado_gb": 66.793386613
 }
 ```
 
@@ -439,14 +532,15 @@
   "p99_pooled": 0.8317146450281112,
   "rule": "B = min(50, max(4, 2*p99_pooled))",
   "beta_bound": 4.0,
-  "samples": 200
+  "samples": 200,
+  "limitation": "ativações medidas com o ruído sintético do piloto (pilot-only, cost measurement) e fala VCTK/CV27; máximo observado 7.4 > B=4"
 }
 ```
 
 ## Pendências
 
 - CV 27.0 pt: manifest `cv27-pt.jsonl` presente
-- `disk.json` mediu `tract_check_target` como nulo (medido de um worktree sem build); o alvo real tem cerca de 0,55 GB e a projeção de disco o desconta como 0 (margem do go de disco cobre com folga).
+- Disco: fatores FLAC de fala por fonte (VCTK a 48 kHz, LibriSpeech dev-clean a 16 kHz, demais SR interpolados); ruído pelo agregado por SR; `tract_check_target` medido no checkout principal.
 - Decisões de planejamento 1-15 do plano bootstrap+M0 valem como registradas lá.
 
 ## Próximos passos
@@ -488,7 +582,7 @@ offline × runtime; M3: asset reproduzível e I2; M4: réplica do gating e proje
 
 | item | valor | limite | veredito |
 |---|---:|---:|---|
-| disco | 49.701 | 56.423 | go |
+| disco | 50.602 | 56.793 | go |
 | vram_b16 | 4.355 | 7.000 | go |
 | ram_loader | 2.391 | 6.000 | go |
 | tempo_t3 | 10.633 | 35.000 | go |

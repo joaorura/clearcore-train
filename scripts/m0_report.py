@@ -127,8 +127,8 @@ def main() -> None:
         ("Pendências", "- CV 27.0 pt: " + ("manifest `cv27-pt.jsonl` presente"
                                             if (PATHS.data / "manifests/cv27-pt.jsonl").is_file()
                                             else "não ingerido no piloto (custo medido pelos fatores por SR)")
-         + "\n- `disk.json` mediu `tract_check_target` como nulo (medido de um worktree sem build); o alvo real tem "
-           "cerca de 0,55 GB e a projeção de disco o desconta como 0 (margem do go de disco cobre com folga)."
+         + "\n- Disco: fatores FLAC de fala por fonte (VCTK a 48 kHz, LibriSpeech dev-clean a 16 kHz, demais SR "
+           "interpolados); ruído pelo agregado por SR; `tract_check_target` medido no checkout principal."
          + "\n- Decisões de planejamento 1-15 do plano bootstrap+M0 valem como registradas lá."),
         ("Próximos passos", PROXIMOS),
     ]
