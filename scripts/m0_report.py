@@ -47,6 +47,12 @@ def decisoes(offline: dict, rir: dict) -> str:
 - **Mistura:** convenção de SNR (ruído escalado contra alvo + interferente) e alvo seco não alinhado à RIR aceitos no
   M0, a conferir contra a spec §4.4 (decisão do orquestrador, não medido aqui).
 - **Splits e loader:** `training_records` recusa `test`/`dev`; o loader tem `allowed_splits`.
+- **Ruling C5 (16 kHz):** o ruling C5 do orquestrador tirou o caminho de 16 kHz (LibriSpeech dev-clean, split `dev`)
+  do loader e da medição de B: o treino e a medição de B não consomem nada a 16 kHz. O fator FLAC a 16 kHz do
+  LibriSpeech continua só na projeção de disco (medição de espaço, não de treino).
+- **Unidade de disco:** a reserva do budget (`disk.reserve_gb: 10`) e a guarda `cctrain.disk` usam GB decimais
+  (1 GB = 10^9 B), a mesma unidade do relatório; a guarda usava GiB (reserva de 10,74 GB), o que deixava a margem
+  reportada inconsistente com a guarda.
 - **Go/no-go:** segue estritamente os níveis congelados de `configs/m0/budget-v1.yaml` (verificados por SHA-256);
   nenhum nível foi ajustado depois das medições.
 """
@@ -124,7 +130,7 @@ def disk_note(disk_row: dict) -> str:
     fora = "\n".join(f"- {x}" for x in DISK_FORA)
     return (f"O veredito de disco (**{disk_row['verdict']}**) tem margem de {margin:.2f} GB "
             f"(limite {disk_row['limit']:.2f} GB menos projeção {disk_row['value']:.2f} GB), "
-            f"já descontada a reserva de 10 GB. **Não estão na projeção:**\n\n{fora}\n\n"
+            f"já descontada a reserva de 10 GB (GB decimais, como no budget). **Não estão na projeção:**\n\n{fora}\n\n"
             "Por isso o go de disco é condicional: re-projetar o disco incluindo esses itens antes do M1.")
 
 
@@ -157,6 +163,13 @@ def ecapa_line(ecapa: dict) -> str:
     return "- ECAPA no tract (pooling): " + "; ".join(parts)
 
 
+def _resumo_line(r: dict, margin: float) -> str:
+    if r["item"] == "disco" and r["verdict"] == "go":
+        return (f"- disco: **go (condicional — margem {margin:.2f} GB; itens fora da projeção listados abaixo)**; "
+                "ver \"Go/no-go do orçamento\"")
+    return f"- {r['item']}: **{r['verdict']}**" + (f" (margem {margin:.2f} GB)" if r["item"] == "disco" else "")
+
+
 def main() -> None:
     i2 = i2_own()
     runs = {n: _load(n) for n in ("env", "i1", "i2_clearcore_fixture", "film_asset", "gating_parity",
@@ -174,9 +187,7 @@ def main() -> None:
     env = {k: v for k, v in runs["env"].items() if k != "nvidia_smi_q_head"}
     disk = {k: v for k, v in runs["disk"].items() if k != "tract_check_target_root"}
     margin = verdicts[0]["limit"] - verdicts[0]["value"]
-    resumo = [f"- {r['item']}: **{r['verdict']}**" + (f" (margem {margin:.2f} GB; ver as exclusões em "
-                                                      f"\"Go/no-go do orçamento\")" if r["item"] == "disco" else "")
-              for r in verdicts]
+    resumo = [_resumo_line(r, margin) for r in verdicts]
     resumo += [f"- I1: **{'aprovado' if runs['i1'].get('pass') else 'REPROVADO'}**; "
                f"I2 (asset do repo): **{'aprovado' if i2.get('pass') else 'REPROVADO'}**",
                f"- B fixado: {runs['beta_rule'].get('beta_bound')}",

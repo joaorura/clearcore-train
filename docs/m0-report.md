@@ -2,7 +2,7 @@
 
 ## Resumo
 
-- disco: **go** (margem 6.49 GB; ver as exclusões em "Go/no-go do orçamento")
+- disco: **go (condicional — margem 6.29 GB; itens fora da projeção listados abaixo)**; ver "Go/no-go do orçamento"
 - vram_b16: **go**
 - ram_loader: **go**
 - tempo_t3: **go**
@@ -29,6 +29,12 @@
 - **Mistura:** convenção de SNR (ruído escalado contra alvo + interferente) e alvo seco não alinhado à RIR aceitos no
   M0, a conferir contra a spec §4.4 (decisão do orquestrador, não medido aqui).
 - **Splits e loader:** `training_records` recusa `test`/`dev`; o loader tem `allowed_splits`.
+- **Ruling C5 (16 kHz):** o ruling C5 do orquestrador tirou o caminho de 16 kHz (LibriSpeech dev-clean, split `dev`)
+  do loader e da medição de B: o treino e a medição de B não consomem nada a 16 kHz. O fator FLAC a 16 kHz do
+  LibriSpeech continua só na projeção de disco (medição de espaço, não de treino).
+- **Unidade de disco:** a reserva do budget (`disk.reserve_gb: 10`) e a guarda `cctrain.disk` usam GB decimais
+  (1 GB = 10^9 B), a mesma unidade do relatório; a guarda usava GiB (reserva de 10,74 GB), o que deixava a margem
+  reportada inconsistente com a guarda.
 - **Go/no-go:** segue estritamente os níveis congelados de `configs/m0/budget-v1.yaml` (verificados por SHA-256);
   nenhum nível foi ajustado depois das medições.
 
@@ -423,7 +429,7 @@
     },
     "total_gb": 50.60202487250599
   },
-  "livre_mais_ja_usado_gb": 67.092869749,
+  "livre_mais_ja_usado_gb": 66.887541365,
   "ja_usado_gb": 9.012511349
 }
 ```
@@ -596,12 +602,12 @@ offline × runtime; M3: asset reproduzível e I2; M4: réplica do gating e proje
 
 | item | valor | limite | margem (limite - valor) | veredito |
 |---|---:|---:|---:|---|
-| disco | 50.602 | 57.093 | 6.491 | go |
+| disco | 50.602 | 56.888 | 6.286 | go |
 | vram_b16 | 4.355 | 7.000 | 2.645 | go |
 | ram_loader | 2.391 | 6.000 | 3.609 | go |
 | tempo_t3 | 10.633 | 35.000 | 24.367 | go |
 
-O veredito de disco (**go**) tem margem de 6.49 GB (limite 57.09 GB menos projeção 50.60 GB), já descontada a reserva de 10 GB. **Não estão na projeção:**
+O veredito de disco (**go**) tem margem de 6.29 GB (limite 56.89 GB menos projeção 50.60 GB), já descontada a reserva de 10 GB (GB decimais, como no budget). **Não estão na projeção:**
 
 - RIR `synthetic-v2` com cauda longa (a projeção conta as 10 000 RIR do `synthetic-v1`, curtas)
 - ambiente `export` do M3 (Python 3.10, torch 1.13.1)
