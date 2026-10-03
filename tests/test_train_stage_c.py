@@ -208,3 +208,17 @@ def test_base_drift_is_detected(corpus):
         assert_base_unchanged(base, before)
     with torch.no_grad():
         next(iter(base.parameters())).sub_(1e-3)
+
+
+def test_freeze_base_freezes_params_and_keeps_rnn_in_train_mode_for_cudnn_backward():
+    from cctrain.models.dfnet3_upstream import load_upstream_dfnet3
+    from cctrain.models.state_hash import state_dict_sha256
+    from cctrain.train.stage_c import freeze_base
+
+    base, _ = load_upstream_dfnet3(device="cpu")
+    before = state_dict_sha256(base)
+    freeze_base(base)
+    assert not any(p.requires_grad for p in base.parameters())
+    assert all(m.training for m in base.modules() if isinstance(m, torch.nn.RNNBase))
+    assert not any(m.training for m in base.modules() if isinstance(m, torch.nn.modules.batchnorm._BatchNorm))
+    assert state_dict_sha256(base) == before

@@ -261,6 +261,18 @@ def total_pss() -> int:
 # --- treino ----------------------------------------------------------------------------------------------------------
 
 
+def freeze_base(base: nn.Module) -> None:
+    """Base em `eval()` (sem atualizar estatísticas), mas com os módulos RNN em modo de treino: o backward do cuDNN
+    RNN exige. Sem dropout nos GRUs do DFNet3 e sem parâmetros alterados, o forward é o mesmo (hash conferido)."""
+    base.eval()
+    for p in base.parameters():
+        p.requires_grad_(False)
+    for m in base.modules():
+        if isinstance(m, nn.RNNBase):
+            assert m.dropout == 0.0
+            m.train()
+
+
 def assert_base_unchanged(base: nn.Module, sha_before: str) -> str:
     after = state_dict_sha256(base)
     if after != sha_before:
@@ -316,9 +328,7 @@ def _run(cfg: StageCConfig, bank: EmbeddingBank, max_minutes: float, data: Stage
 
     device = cfg.device
     base, df_state = load_upstream_dfnet3(device=device)
-    base.eval()
-    for p in base.parameters():
-        p.requires_grad_(False)
+    freeze_base(base)
     sha_before = state_dict_sha256(base)
     torch.manual_seed(cfg.seed)  # inicialização do gerador reprodutível (a camada de saída é zero; a oculta não)
     gen = FilmGenerator(load_film_config()).to(device)
@@ -377,7 +387,7 @@ def _run(cfg: StageCConfig, bank: EmbeddingBank, max_minutes: float, data: Stage
                 nn.utils.clip_grad_norm_(trainable, cfg.grad_clip)
                 opt.step()
                 sched.step()
-                base.eval()
+                freeze_base(base)
                 step += 1
                 batch_idx += 1
                 step_times.append(time.perf_counter() - t0)
