@@ -35,7 +35,8 @@ def test_pilot_sources_load_and_ids_match_filenames():
     assert set(sources) == {"vctk-0.92", "librispeech-dev-clean", "noise-wikimedia-cc0", "cv27-pt",
                             "rir-synthetic-v1", "rir-synthetic-v2", "noise-synthetic-v1",
                            "dns-noise-fullband-cc0", "fsd50k-eval-cc0", "fsd50k-eval-ccby",
-                           "librispeech-train-clean-100", "librispeech-test-clean", "cml-tts-pt"}
+                           "librispeech-train-clean-100", "librispeech-test-clean", "cml-tts-pt",
+                           "tts-portuguese-corpus"}
     assert sources["vctk-0.92"].license == "CC-BY-4.0"
     assert sources["cv27-pt"].license == "CC0-1.0"
     assert "no_rehost" in sources["cv27-pt"].restrictions

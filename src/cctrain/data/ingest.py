@@ -821,3 +821,37 @@ def phase_by_id(phase_id: str, config: Path = PHASES_V1) -> Phase:
         if p["id"] == phase_id:
             return Phase(p["id"], tuple(s["id"] for s in p["sources"]), 0.0, 0.0, 0.0, 0.0, "ok")
     raise ManifestError(f"fase desconhecida: {phase_id}")
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# extra (fora do m1-phases-v1): TTS-Portuguese Corpus, 1 falante pt-BR 48 kHz
+# ---------------------------------------------------------------------------------------------------------------------
+
+TTSPT_URL = "https://www.dropbox.com/s/ohpc7epowv9ct7o/TTS-Portuguese-Corpus.zip?dl=1"
+TTSPT_SIZE = 2371059638
+
+
+def ingest_tts_portuguese(paths: Paths, log=print) -> list[FileRecord]:
+    src_id = "tts-portuguese-corpus"
+    if (cached := _cached(src_id)) is not None:
+        return cached
+    src = _src(src_id)
+    arc = paths.data / "raw" / "_dl" / "TTS-Portuguese-Corpus.zip"
+    d = download_resumable(TTSPT_URL, arc, expected_size=TTSPT_SIZE, log=log)
+    update_lock(src_id, arc.name, d.sha256, d.size)
+    rels = []
+    with zipfile.ZipFile(arc) as z:
+        wavs = sorted(n for n in z.namelist() if n.lower().endswith(".wav") and "__MACOSX" not in n)
+        if not wavs:
+            raise ManifestError("TTS-Portuguese: nenhum WAV no zip")
+        for n in wavs:
+            rel = f"raw/{src_id}/{PurePosixPath(n).stem}.flac"
+            if not (paths.data / rel).is_file():
+                _write_flac(io.BytesIO(z.read(n)), paths.data / rel)
+            rels.append(rel)
+    records = build_records(rels, paths.data, source=src, split="train", codec="flac",
+                            speaker_of=lambda rel: "ttsptbr-male1")
+    write_file_manifest(records, _manifest_file(src_id))
+    arc.unlink()
+    log(f"{src_id}: {len(records)} arquivos, {sum(map(_seconds, records)) / 3600:.2f} h")
+    return records

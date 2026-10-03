@@ -33,12 +33,17 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--phases", nargs="*", type=int, help="números das fases (1-5); padrão: todas")
     ap.add_argument("--status", default="fetch-status.json", help="arquivo de estado em runs/m1")
+    ap.add_argument("--extra", choices=["tts-portuguese"], help="fonte fora do m1-phases-v1")
     ap.add_argument("--prefetch-only", action="store_true")
     args = ap.parse_args(argv)
     paths = Paths.from_env()
     if args.prefetch_only:
         for k, d in ingest.prefetch_phase1(Path(paths.data), log=_log).items():
             _log(f"{k}: {d.size} B sha256 {d.sha256}")
+        return 0
+    if args.extra:
+        recs = ingest.ingest_tts_portuguese(paths, log=_log)
+        _log(f"extra {args.extra}: {len(recs)} arquivos")
         return 0
     cfg = load_phases_config()
     ids = [p["id"] for p in cfg["phases"]]

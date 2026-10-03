@@ -1,0 +1,11 @@
+id: tts-portuguese-corpus
+name: "TTS-Portuguese Corpus (1 falante masculino pt-BR, 48 kHz)"
+url: "https://www.dropbox.com/s/ohpc7epowv9ct7o/TTS-Portuguese-Corpus.zip?dl=1"
+landing_page: "https://github.com/Edresson/TTS-Portuguese-Corpus"
+license: CC-BY-4.0
+license_evidence: "Repositório Edresson/TTS-Portuguese-Corpus: licença do repositório CC-BY-4.0 (API do GitHub, 2026-10-03) e README: 'The dataset is open source, and public available under the terms of the license Creative Commons Attribution 4.0 (CC BY 4.0)'. O espelho do Hugging Face citado no README devolve 401; o zip vem do Dropbox do README (2.371.059.638 B)"
+role: train
+attribution: "Casanova, E. et al. TTS-Portuguese Corpus: a corpus for speech synthesis in Brazilian Portuguese. arXiv:2005.05144 (2020). CC BY 4.0."
+native_sr: 48000
+access: http_range_zip
+restrictions: [single_speaker_not_for_enrollment]
