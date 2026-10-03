@@ -1,11 +1,20 @@
 clearcore-train
-Licensed under MIT OR Apache-2.0, at your option.
 
-Third-party components:
+Source code: PolyForm Noncommercial License 1.0.0 (see LICENSE).
+Model weights and documentation authored by Clearcore: CC BY-NC 4.0 (see LICENSE-MODELS;
+legal code: https://creativecommons.org/licenses/by-nc/4.0/legalcode).
+Versions published before 2026-10-03 as MIT OR Apache-2.0 keep those terms.
+
+Third-party components keep their own licenses and notices, which this project does not change:
 
 - DeepFilterNet v0.5.6 (third_party/DeepFilterNet), Copyright (c) Hendrik Schröter,
   MIT OR Apache-2.0. Patches are marked CCTRAIN-PATCH and listed in third_party/DeepFilterNet/PATCHES.md.
 - add_film() in src/cctrain/export/film.py is copied from tools/accelerators/gen_film_onnx.py of the
-  Clearcore repository (MIT OR Apache-2.0).
+  Clearcore repository, as it was licensed when copied (MIT OR Apache-2.0); this project's own
+  code is now PolyForm Noncommercial 1.0.0.
+- The voice-enrollment encoder builds on the pre-trained SpeechBrain ECAPA weights
+  (speechbrain/spkrec-ecapa-voxceleb, Apache-2.0), trained on VoxCeleb ("research purposes";
+  audio copyright remains with the video owners). Weights derived from it are CC BY-NC 4.0 and
+  non-commercial only.
 
 Data attributions (CC BY 4.0 sources used for training) are listed per source in manifests/sources/.

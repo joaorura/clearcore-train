@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.90"
 publish = false
-license = "MIT OR Apache-2.0"
+license = "PolyForm-Noncommercial-1.0.0"
 description = "Carrega assets do Clearcore com o mesmo DfTract do runtime (tract 0.19.16): identidade, gating, enrollment"
 
 [workspace]

@@ -3,7 +3,7 @@ name = "cctrain"
 version = "0.0.0"
 description = "Clearcore Train: pDFNet3 + speaker enrollment (subproject A)"
 requires-python = "==3.11.*"
-license = "MIT OR Apache-2.0"
+license = "PolyForm-Noncommercial-1.0.0"
 dependencies = [
   "numpy>=1.26,<2",
   "scipy>=1.11",

@@ -1,0 +1,28 @@
+clearcore-train model weights
+=============================
+
+Copyright (c) 2026 Clearcore
+
+The model weights and model assets that Clearcore authors itself (for example the
+pDFNet3 model, the neural EQ and the voice-enrollment model `enrollment.onnx`,
+`voice-enrollment-asset-v1`) are licensed under the Creative Commons
+Attribution-NonCommercial 4.0 International license (CC BY-NC 4.0, SPDX:
+CC-BY-NC-4.0).
+
+  Summary:   https://creativecommons.org/licenses/by-nc/4.0/
+  Legal code: https://creativecommons.org/licenses/by-nc/4.0/legalcode
+
+This license does NOT cover third-party material, which keeps its own license and
+notices:
+
+  - DeepFilterNet v0.5.6 code and weights vendored in `third_party/DeepFilterNet/`
+    (MIT OR Apache-2.0, Copyright (c) 2021 Hendrik Schröter);
+  - the SpeechBrain ECAPA pre-trained weights (`speechbrain/spkrec-ecapa-voxceleb`,
+    Apache-2.0) that the enrollment model builds on, and the VoxCeleb data it was
+    trained on (research purposes; audio copyright remains with the video owners).
+
+See `NOTICE` and `third_party/` (upstream license files are kept unchanged).
+
+Clearcore source code is licensed separately under the PolyForm Noncommercial
+License 1.0.0 (see `LICENSE`). Documentation and media authored by Clearcore are also licensed under
+CC BY-NC 4.0 (same terms as above).
