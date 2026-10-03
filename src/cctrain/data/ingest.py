@@ -365,7 +365,11 @@ def _write_flac(audio_bytes_or_path, dest: Path) -> float:
 
 
 def _wav_to_flac_job(args: tuple[str, str]) -> float:
+    """WAV -> FLAC e apaga o WAV extraído por nós. WAV sem amostras (existe no CML-TTS) é descartado, sem FLAC vazio."""
     src, dst = args
+    if sf.info(src).frames == 0:
+        Path(src).unlink()
+        return 0.0
     dur = _write_flac(src, Path(dst))
     Path(src).unlink()
     return dur
@@ -637,13 +641,13 @@ def ingest_librispeech(paths: Paths, subset: str, log=print) -> list[FileRecord]
 
 
 # ---------------------------------------------------------------------------------------------------------------------
-# fase 4: CML-TTS pt (teto 30 h, 40 min por falante)
+# fase 4: CML-TTS pt (teto 30 h, 3,5 h por falante)
 # ---------------------------------------------------------------------------------------------------------------------
 
 CML_PREFIX = "cml_tts_dataset_portuguese_v0.1"
 CML_MD5 = "743bad054ca861688aa026e505b26aff"
 CML_HOURS_CAP = 30.0
-CML_SPEAKER_CAP_S = 2400.0
+CML_SPEAKER_CAP_S = 12600.0
 
 
 def cml_select_factory(hours_cap: float = CML_HOURS_CAP, speaker_cap_s: float = CML_SPEAKER_CAP_S):
@@ -688,6 +692,9 @@ def ingest_cml(paths: Paths, log=print) -> list[FileRecord]:
         jobs = [(str(p), str(p.with_suffix(".flac"))) for p in wavs]
         with ProcessPoolExecutor(max_workers=int(os.environ.get("CCTRAIN_INGEST_WORKERS", "4"))) as pool:
             list(pool.map(_wav_to_flac_job, jobs, chunksize=8))
+    for empty in out_dir.rglob("*.flac"):
+        if empty.stat().st_size == 0:  # sobra de uma execução anterior com WAV vazio
+            empty.unlink()
     flacs = sorted(p.relative_to(paths.data).as_posix() for p in out_dir.rglob("*.flac"))
     if not flacs:
         raise ManifestError("CML-TTS: nenhum áudio extraído")

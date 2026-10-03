@@ -2,6 +2,7 @@ import hashlib
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -182,3 +183,30 @@ def test_write_flac_native_rate_roundtrip(tmp_path):
     dur = ingest._write_flac(str(wav), tmp_path / "a.flac")
     y, sr = sf.read(str(tmp_path / "a.flac"), dtype="int16")
     assert sr == 24000 and dur == 1.0 and np.array_equal(x, y)
+
+
+def test_empty_wav_is_dropped_without_empty_flac(tmp_path):
+    wav = tmp_path / "e.wav"
+    sf.write(str(wav), np.zeros(0, dtype="int16"), 24000, subtype="PCM_16")
+    assert ingest._wav_to_flac_job((str(wav), str(tmp_path / "e.flac"))) == 0.0
+    assert not wav.exists() and not (tmp_path / "e.flac").exists()
+
+
+def test_fetch_script_blocked_phase_exits_2_with_deficit(tmp_path, monkeypatch, capsys):
+    import importlib.util
+    import shutil
+    from collections import namedtuple
+
+    monkeypatch.setenv("CCTRAIN_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("CCTRAIN_RUNS_DIR", str(tmp_path / "runs"))
+    (tmp_path / "data").mkdir()
+    usage = namedtuple("usage", "total used free")
+    monkeypatch.setattr(shutil, "disk_usage", lambda p: usage(100 * GB, 80 * GB, 20 * GB))
+    spec = importlib.util.spec_from_file_location("fetch_m1", Path(__file__).resolve().parents[1] / "scripts" / "fetch_m1.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert mod.main(["--phases", "1"]) == 2
+    status = json.loads((tmp_path / "runs" / "m1" / "fetch-status.json").read_text())
+    assert status["1-noise-rir-encoder"]["status"] == "blocked_disk" and status["1-noise-rir-encoder"]["deficit_gb"] > 0
+    assert "déficit" in capsys.readouterr().out
+    assert not list((tmp_path / "data").rglob("*"))  # nada foi baixado

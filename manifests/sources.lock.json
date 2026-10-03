@@ -1,4 +1,11 @@
 {
+  "cml-tts-pt": {
+    "cml_tts_dataset_portuguese_v0.1.tar.bz": {
+      "sha256": "92b391b2e6337b6209200dc18e0284886e3dd4dcd5ceead13890acaee144f2ec",
+      "size": 9765267843,
+      "upstream_checksum": "md5:743bad054ca861688aa026e505b26aff"
+    }
+  },
   "cv27-pt": {
     "common-voice-scripted-speech-27-0-portug-c1c03212.tar.gz": {
       "sha256": "d5c6e70d669378ce8178b2a0f03e3281d67c4ee5ddd5200718221b28e0b93e60",
@@ -71,6 +78,13 @@
       "sha256": "22feeb40cb2172db27bd89b16b56757b62a78f4e319a10552a063f56090a56cc",
       "size": 6000000,
       "upstream_checksum": "clearcore-clip:igual"
+    }
+  },
+  "tts-portuguese-corpus": {
+    "TTS-Portuguese-Corpus.zip": {
+      "sha256": "9704531ca602bdef8d974fb440decd104e37db32e5c88a10c53fa15da580966f",
+      "size": 2371059638,
+      "upstream_checksum": null
     }
   },
   "vctk-0.92": {

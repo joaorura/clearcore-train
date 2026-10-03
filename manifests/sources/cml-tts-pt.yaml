@@ -1,5 +1,5 @@
 id: cml-tts-pt
-name: "CML-TTS Portuguese v0.1 (OpenSLR 146; teto de 30 h e 40 min por falante)"
+name: "CML-TTS Portuguese v0.1 (OpenSLR 146; teto de 30 h e 3,5 h por falante)"
 url: "https://www.openslr.org/resources/146/cml_tts_dataset_portuguese_v0.1.tar.bz"
 landing_page: "https://www.openslr.org/146/"
 license: CC-BY-4.0
