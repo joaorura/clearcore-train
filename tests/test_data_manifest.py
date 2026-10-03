@@ -29,7 +29,7 @@ def _rec(**kw) -> FileRecord:
 def test_pilot_sources_load_and_ids_match_filenames():
     sources = load_sources()
     assert set(sources) == {"vctk-0.92", "librispeech-dev-clean", "noise-wikimedia-cc0", "cv27-pt",
-                            "rir-synthetic-v1"}
+                            "rir-synthetic-v1", "noise-synthetic-v1"}
     assert sources["vctk-0.92"].license == "CC-BY-4.0"
     assert sources["cv27-pt"].license == "CC0-1.0"
     assert "no_rehost" in sources["cv27-pt"].restrictions

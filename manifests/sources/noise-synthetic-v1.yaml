@@ -1,0 +1,10 @@
+id: noise-synthetic-v1
+name: "Ruído colorido sintético (branco, rosa, marrom), gerado por cctrain; pilot-only, cost measurement"
+url: "local:scripts/gen_noise_pilot.py"
+landing_page: "local"
+license: LicenseRef-cctrain-generated
+license_evidence: "Gerado por este repositório, sem dados de terceiros (ruído gaussiano com espectro 1/f^k, seed fixa); mesma licença das RIR sintéticas"
+role: train
+attribution: "clearcore-train"
+native_sr: 48000
+access: generated

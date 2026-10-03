@@ -2,7 +2,7 @@
 # congelado antes do T2. Enquanto beta_bound for null, load_film_config recusa a config.
 version: 1
 log_gamma_bound: 2.302585092994046
-beta_bound: null
+beta_bound: 4.0  # fixado no M0 (regra da spec §3.2)
 beta_rule:
   sites: [enc.emb_gru.linear_in, df_dec.df_gru.linear_in]
   percentile: 99
