@@ -46,6 +46,25 @@ def build_prototype(seed: int, context_mode: str, beta_bound: float = 4.0, out_s
     return EnrollmentModel(TractSafeFbank(), ECAPATDNN(context_mode=context_mode), gen).eval()
 
 
+def randomize_bn_stats(model: nn.Module, seed: int) -> None:
+    """Dá a todo BatchNorm estatísticas e parâmetros afins não triviais, com semente.
+
+    A inicialização padrão (média 0, variância 1, γ=1, β=0) faz a BN de inferência valer a identidade e esconde erros
+    de dobra da BN no export. Aqui: média ~ N(0, 0.5²), variância ~ U(0.5, 2), γ ~ U(0.5, 1.5), β ~ N(0, 0.2²).
+    """
+    gen = torch.Generator().manual_seed(seed)
+    with torch.no_grad():
+        for m in model.modules():
+            if not isinstance(m, nn.modules.batchnorm._BatchNorm):
+                continue
+            shape = m.running_mean.shape
+            m.running_mean.copy_(torch.randn(shape, generator=gen) * 0.5)
+            m.running_var.copy_(0.5 + 1.5 * torch.rand(shape, generator=gen))
+            if m.affine:
+                m.weight.copy_(0.5 + torch.rand(shape, generator=gen))
+                m.bias.copy_(torch.randn(shape, generator=gen) * 0.2)
+
+
 def export_enrollment_onnx(model: EnrollmentModel, path: Path) -> Path:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
