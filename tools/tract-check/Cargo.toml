@@ -1,0 +1,25 @@
+[package]
+name = "tract-check"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.90"
+publish = false
+license = "MIT OR Apache-2.0"
+description = "Carrega assets do Clearcore com o mesmo DfTract do runtime (tract 0.19.16): identidade, gating, enrollment"
+
+[workspace]
+resolver = "3"
+
+[dependencies]
+deep_filter = { git = "https://github.com/joaorura/clearcore.git", rev = "70dc85cf2c767cf2dbde9b569f7b72cb00d8d4aa", package = "deep_filter_fork", default-features = false, features = ["tract"] }
+tract-core = { version = "=0.19.16", default-features = false }
+tract-hir = { version = "=0.19.16", default-features = false }
+tract-onnx = { version = "=0.19.16", default-features = false }
+tract-pulse = { version = "=0.19.16", default-features = false }
+ndarray = { version = "=0.15.6", default-features = false, features = ["std"] }
+sha2 = "0.10"
+serde_json = "1"
+anyhow = "1"
+
+[profile.release]
+opt-level = 3
