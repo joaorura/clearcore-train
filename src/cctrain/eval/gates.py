@@ -12,6 +12,7 @@ from cctrain.hashing import sha256_file
 from cctrain.paths import repo_root
 
 GATES_V1 = repo_root() / "configs" / "eval" / "gates-v1.yaml"
+GATES_V2 = repo_root() / "configs" / "eval" / "gates-v2.yaml"
 BUDGET_V1 = repo_root() / "configs" / "m0" / "budget-v1.yaml"
 REQUIRED_GATES = tuple(f"G{i}" for i in range(12))
 OPTIONAL_GATES = ("G3b", "G5b")
@@ -85,8 +86,9 @@ def load_gates(path: Path = GATES_V1, *, verify: bool = True) -> GateSet:
     path = Path(path)
     digest = verify_frozen(path) if verify else sha256_file(path)
     data = yaml.safe_load(path.read_text())
-    if data.get("version") != 1:
-        raise GatesError("version deve ser 1")
+    version = data.get("version")
+    if version not in (1, 2):
+        raise GatesError("version deve ser 1 ou 2")
     raw_gates = data.get("gates") or {}
     missing = [g for g in REQUIRED_GATES if g not in raw_gates]
     if missing:
@@ -110,7 +112,7 @@ def load_gates(path: Path = GATES_V1, *, verify: bool = True) -> GateSet:
     if set(probe) != _PROBE_KEYS:
         raise GatesError(f"probe_rule deve ter {sorted(_PROBE_KEYS)}")
     return GateSet(
-        version=1, gates=gates, m1=m1, probe_rule=probe,
+        version=version, gates=gates, m1=m1, probe_rule=probe,
         calibrated_in_dev=tuple(data.get("calibrated_in_dev") or ()),
         statistics=data.get("statistics") or {}, runtime_path=data.get("runtime_path") or {},
         informative=data.get("informative") or {}, sha256=digest,

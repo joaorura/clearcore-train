@@ -92,3 +92,47 @@ def test_verify_frozen_rejects_empty_lock(tmp_path: Path):
     p.with_suffix(".sha256").write_text("  \n")
     with pytest.raises(GatesError, match="vazio"):
         verify_frozen(p)
+
+
+# ---- gates-v2 (M1 Tarefa 9): troca só a lista de avaliadores do G5, com a decisão do dono ----
+
+import yaml  # noqa: E402
+
+from cctrain.eval.gates import GATES_V2  # noqa: E402
+from cctrain.hashing import sha256_file  # noqa: E402
+
+
+def _drop_g5_evaluators(d: dict) -> dict:
+    d = yaml.safe_load(yaml.safe_dump(d))
+    del d["gates"]["G5"]["criteria"]["evaluators"]
+    d.pop("version")
+    return d
+
+
+def test_gates_v2_is_frozen_and_loads():
+    gs = load_gates(GATES_V2)
+    assert gs.version == 2
+    assert gs.gates["G5"].criteria["evaluators"] == ["wespeaker-resnet34"]
+
+
+def test_gates_v2_differs_from_v1_only_in_g5_evaluators():
+    v1 = yaml.safe_load(GATES_V1.read_text())
+    v2 = yaml.safe_load(GATES_V2.read_text())
+    assert v1["gates"]["G5"]["criteria"]["evaluators"] == ["speechbrain-ecapa", "wespeaker-resnet34"]
+    assert v2["gates"]["G5"]["criteria"]["evaluators"] == ["wespeaker-resnet34"]
+    assert (v1["version"], v2["version"]) == (1, 2)
+    assert _drop_g5_evaluators(v1) == _drop_g5_evaluators(v2)  # nenhum nível mudou, nenhum gate foi tocado
+
+
+def test_gates_v2_cites_the_owner_decision_and_pins_v1():
+    head = GATES_V2.read_text().split("version:")[0]
+    assert "decisão do dono" in head and "2026-10-03" in head and "gates-v1.sha256" in head
+    assert GATES_V1.with_suffix(".sha256").read_text().split()[0] in head  # hash do v1 citado
+    assert sha256_file(GATES_V1) == GATES_V1_SHA256  # o v1 continua intocado
+
+
+def test_gates_v2_edit_breaks_the_freeze(tmp_path: Path):
+    p = _copy(tmp_path, GATES_V2)
+    p.write_text(p.read_text().replace("eer_max: {librispeech_test_clean: 0.03", "eer_max: {librispeech_test_clean: 0.04"))
+    with pytest.raises(GatesError, match="congelado"):
+        load_gates(p)

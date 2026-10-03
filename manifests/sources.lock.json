@@ -93,5 +93,22 @@
       "size": 17416,
       "upstream_checksum": "md5:2946b37a07baeba80cea628909e28cae"
     }
+  },
+  "wespeaker-voxceleb-resnet34": {
+    "README.md": {
+      "sha256": "4bcf87ecfbbb8e07a01b21415a970c8b53a5283bf6872b657040d3f45c9241f7",
+      "size": 31,
+      "upstream_checksum": null
+    },
+    "config.yaml": {
+      "sha256": "10d328c36178263b787ded901d9290ead35124f876edba7e78bbf423208496f5",
+      "size": 1536,
+      "upstream_checksum": null
+    },
+    "voxceleb_resnet34.onnx": {
+      "sha256": "9fea6516d7ad6bf0a76c7689f5a49b65d330fad6dde96c91bb4435ffbfe056a1",
+      "size": 26534127,
+      "upstream_checksum": "sha256:9fea6516d7ad6bf0a76c7689f5a49b65d330fad6dde96c91bb4435ffbfe056a1"
+    }
   }
 }

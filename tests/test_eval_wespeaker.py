@@ -100,3 +100,11 @@ def test_same_speaker_closer_than_different(evaluator, paths):
     same = [cosine(e[i], e[j]) for e in embs.values() for i in range(len(e)) for j in range(i + 1, len(e))]
     diff = [cosine(embs[a][i], embs[b][i]) for a in spk for b in spk if a < b for i in range(6)]
     assert np.mean(same) > np.mean(diff) + 0.2
+
+
+def test_lock_pins_the_checkpoint_hash():
+    from cctrain.data.manifest import lock_entry
+
+    m = load_model_manifest()
+    e = lock_entry("wespeaker-voxceleb-resnet34", "voxceleb_resnet34.onnx")
+    assert e["sha256"] == m["files"]["voxceleb_resnet34.onnx"]["sha256"] and e["size"] == m["files"]["voxceleb_resnet34.onnx"]["size"]
