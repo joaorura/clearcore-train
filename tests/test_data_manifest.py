@@ -43,7 +43,7 @@ def test_source_missing_key_is_rejected(tmp_path: Path):
 
 
 def test_source_id_must_match_filename(tmp_path: Path):
-    src = (Path(__file__).resolve().parents[1] / "manifests/sources/vctk-0.92.yaml").read_text()
+    src = (Path(__file__).resolve().parents[1] / "manifests/sources/vctk-0.92.yaml").read_text(encoding="utf-8")
     (tmp_path / "other.yaml").write_text(src)
     with pytest.raises(ManifestError, match="id"):
         load_sources(tmp_path)
@@ -75,6 +75,54 @@ def test_training_records_enforce_allowlist_and_source_license():
         training_records([_rec(role="test_only")], sources)
     with pytest.raises(ManifestError, match="fonte"):
         training_records([_rec(source_id="voxceleb")], sources)
+
+
+def test_training_records_cross_check_record_role_against_source_role(tmp_path: Path):
+    src = (Path(__file__).resolve().parents[1] / "manifests/sources/vctk-0.92.yaml").read_text(encoding="utf-8")
+    (tmp_path / "demand-test.yaml").write_text(
+        src.replace("id: vctk-0.92", "id: demand-test").replace("role: train", "role: test_only"), encoding="utf-8"
+    )
+    sources = load_sources(tmp_path)
+    assert sources["demand-test"].role.value == "test_only"
+    with pytest.raises(ManifestError, match="papel"):
+        training_records([_rec(source_id="demand-test")], sources)
+
+
+def test_duplicate_paths_are_rejected(tmp_path: Path):
+    with pytest.raises(ManifestError, match="duplicado"):
+        write_file_manifest([_rec(), _rec(sha256="b" * 64)], tmp_path / "m.jsonl")
+
+
+def test_from_dict_rejects_missing_and_extra_keys():
+    good = _rec().to_dict()
+    with pytest.raises(ManifestError, match="chaves"):
+        FileRecord.from_dict({k: v for k, v in good.items() if k != "codec"})
+    with pytest.raises(ManifestError, match="chaves"):
+        FileRecord.from_dict({**good, "extra": 1})
+
+
+def test_invalid_role_is_manifest_error(tmp_path: Path):
+    with pytest.raises(ManifestError):
+        _rec(role="nope")
+    src = (Path(__file__).resolve().parents[1] / "manifests/sources/vctk-0.92.yaml").read_text(encoding="utf-8")
+    (tmp_path / "vctk-0.92.yaml").write_text(src.replace("role: train", "role: nope"), encoding="utf-8")
+    with pytest.raises(ManifestError, match="papel"):
+        load_sources(tmp_path)
+
+
+@pytest.mark.parametrize("lic_line", ["license:", "license: null", "license: ''"])
+def test_null_or_empty_source_license_is_rejected(tmp_path: Path, lic_line: str):
+    src = (Path(__file__).resolve().parents[1] / "manifests/sources/vctk-0.92.yaml").read_text(encoding="utf-8")
+    (tmp_path / "vctk-0.92.yaml").write_text(src.replace("license: CC-BY-4.0", lic_line), encoding="utf-8")
+    with pytest.raises(ManifestError, match="licença"):
+        load_sources(tmp_path)
+
+
+def test_non_ascii_speaker_roundtrip_is_utf8(tmp_path: Path):
+    rec = _rec(speaker="falante-ção")
+    write_file_manifest([rec], tmp_path / "m.jsonl")
+    assert "falante-ção" in (tmp_path / "m.jsonl").read_bytes().decode("utf-8")
+    assert read_file_manifest(tmp_path / "m.jsonl") == [rec]
 
 
 def test_lock_refuses_hash_change(tmp_path: Path):
