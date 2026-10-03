@@ -43,6 +43,8 @@ pytestmark = [pytest.mark.tract, pytest.mark.clearcore, pytest.mark.data]
 FRAMES = 1000
 WINDOW = 8
 P1_ATOL, P1_RTOL = 1e-5, 1e-6
+# emb (512 canais, saída da GRU) deriva ~2e-5 em 1.000 quadros entre ORT e PyTorch (excesso +1,08e-5 sobre o atol literal)
+EMB_FULL_SEQUENCE_ATOL = 1e-4
 P2_ABS, P2_REL = 1e-4, 1e-4
 PROFILES = ("random", "extreme_enc_up_df_down", "extreme_enc_down_df_up")
 
@@ -188,7 +190,8 @@ def _tile(a: np.ndarray, steps: int) -> np.ndarray:
     return np.broadcast_to(a, (1, steps, HIDDEN)).copy()
 
 
-def _ort_vs_torch(base, sessions, ferb, fspec, vec, steps: int) -> dict[str, float]:
+def _ort_vs_torch(base, sessions, ferb, fspec, vec, steps: int, atol_override: dict[str, float] | None = None,
+                  ) -> dict[str, float]:
     """Excesso de P1 por saída dos 3 grafos sobre `steps` quadros, partindo de estado zero."""
     v = _split(vec)
     worst: dict[str, float] = {}
@@ -203,6 +206,7 @@ def _ort_vs_torch(base, sessions, ferb, fspec, vec, steps: int) -> dict[str, flo
     for name, ref in zip(("e0", "e1", "e2", "e3", "emb", "c0", "lsnr"), (e0, e1, e2, e3, emb, c0, lsnr), strict=True):
         # lsnr = sigmoid · (lsnr_max − lsnr_min) + lsnr_min: o atol de 1e-5 vale na saída da sigmoid (escala 50 dB)
         atol = P1_ATOL * float(base.enc.lsnr_scale) if name == "lsnr" else P1_ATOL
+        atol = (atol_override or {}).get(f"enc.{name}", atol)
         worst[f"enc.{name}"] = _excess(outs[name], ref.numpy(), atol, P1_RTOL)
     got_m = sessions["erb_dec"].run(None, {"emb": emb.numpy(), "e3": e3.numpy(), "e2": e2.numpy(), "e1": e1.numpy(),
                                            "e0": e0.numpy()})[0]
@@ -228,13 +232,13 @@ def test_p1_ort_matches_pytorch_with_non_identity_film(base, sessions, mixture, 
                           WINDOW)
         for k, x in w.items():
             windows[k] = max(windows.get(k, -1.0), x)
-    drift = _ort_vs_torch(base, sessions, ferb, fspec, vec, steps)  # sequência inteira: só informativo
+    # sequência inteira de 1.000 quadros: os mesmos atol/rtol literais; só enc.emb tem tolerância explícita maior
+    drift = _ort_vs_torch(base, sessions, ferb, fspec, vec, steps, atol_override={"enc.emb": EMB_FULL_SEQUENCE_ATOL})
     (m0_runs / f"p1_film_{profile}.json").write_text(json.dumps(
         {"profile": profile, "frames": steps, "window": WINDOW, "atol": P1_ATOL, "rtol": P1_RTOL,
          "worst_excess_windowed": windows, "worst_excess_full_sequence": drift}, indent=2) + "\n")
     assert all(x <= 0 for x in windows.values()), windows
-    # recorrência de 1.000 quadros acumula erro fp32 entre ORT e PyTorch mesmo sem FiLM: limite frouxo, não o P1
-    assert all(x <= 1e-3 for x in drift.values()), drift
+    assert all(x <= 0 for x in drift.values()), drift
 
 
 @pytest.mark.parametrize("profile", PROFILES)
