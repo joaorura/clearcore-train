@@ -66,7 +66,7 @@ def cmd_cv(paths: Paths, workers: int) -> int:
     _log(f"embeddings prontos: {len(embs)}/{len(pool)} em {time.time() - t0:.0f} s")
 
     dev_pool = [r for r in pool if r.speaker_key in dev_keys]
-    eer, thr = calibrate_threshold(dev_pool, embs, n_pairs=20_000, seed=CV_SPLIT_SEED)
+    eer, thr = calibrate_threshold(dev_pool, embs, n_pairs=5000, seed=CV_SPLIT_SEED)
     _log(f"dev CV: EER {eer:.4f} no limiar de cosseno {thr:.4f}")
 
     stats = FilterStats()

@@ -9,7 +9,7 @@ import json
 import sys
 
 from cctrain.data.manifest import read_file_manifest
-from cctrain.data.splits import SPLITS_V1, assign_splits, load_split_config
+from cctrain.data.splits import SPLITS_V1, assign_splits, dedupe_by_sha256, load_split_config
 from cctrain.hashing import sha256_file
 from cctrain.paths import repo_root
 
@@ -23,7 +23,8 @@ def non_cv_speech_records():
         if f.name.endswith(NON_SPEECH_SUFFIX):
             continue
         recs += [r for r in read_file_manifest(f) if r.speaker is not None and r.split != "pilot"]
-    return recs
+    # o manifest do piloto do VCTK repete 6 clipes do mic1 (mesmo SHA-256, outro caminho): um registro por conteúdo
+    return dedupe_by_sha256(recs)
 
 
 def main() -> int:

@@ -157,7 +157,7 @@ def filter_clips(records: Iterable[FileRecord], embeddings: Mapping[str, np.ndar
     return sorted(kept_all, key=lambda r: r.path)
 
 
-def calibrate_threshold(records: Iterable[FileRecord], embeddings: Mapping[str, np.ndarray], *, n_pairs: int = 20_000,
+def calibrate_threshold(records: Iterable[FileRecord], embeddings: Mapping[str, np.ndarray], *, n_pairs: int = 5000,
                         seed: int = 0) -> tuple[float, float]:
     """(EER, limiar de cosseno no EER) do avaliador sobre pares do mesmo `client_id` × clientes diferentes."""
     recs = [r for r in records if r.path in embeddings]
