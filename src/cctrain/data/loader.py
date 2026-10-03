@@ -16,8 +16,23 @@ from torch.utils.data import IterableDataset, get_worker_info
 
 from cctrain.data.audio import load_audio, resample
 from cctrain.data.features import SR, analysis, extract_features
-from cctrain.data.manifest import FILES_DIR, FileRecord, SourceManifest, load_sources, read_file_manifest, training_records
-from cctrain.data.mix import SIR_RANGE_DB, SNRS_DB, MixKind, crop_or_pad, loop_to_length, make_mixture, mixture_fractions
+from cctrain.data.manifest import (
+    FILES_DIR,
+    FileRecord,
+    SourceManifest,
+    load_sources,
+    read_file_manifest,
+    training_records,
+)
+from cctrain.data.mix import (
+    SIR_RANGE_DB,
+    SNRS_DB,
+    MixKind,
+    crop_or_pad,
+    loop_to_length,
+    make_mixture,
+    mixture_fractions,
+)
 
 
 @dataclass(frozen=True)
