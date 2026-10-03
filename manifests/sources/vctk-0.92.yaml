@@ -1,0 +1,10 @@
+id: vctk-0.92
+name: "CSTR VCTK Corpus 0.92 (somente mic1)"
+url: "https://datashare.ed.ac.uk/server/api/core/bitstreams/535f4286-e54c-4038-838c-a02285e32cb2/content"
+landing_page: "https://datashare.ed.ac.uk/handle/10283/3443"
+license: CC-BY-4.0
+license_evidence: "DataShare ?show=full (R04 §1.1); o arquivo de licença dentro do zip é conferido na Task 12"
+role: train
+attribution: "Yamagishi, J., Veaux, C., MacDonald, K. CSTR VCTK Corpus 0.92, University of Edinburgh. CC BY 4.0. doi:10.7488/ds/2645"
+native_sr: 48000
+access: http_range_zip

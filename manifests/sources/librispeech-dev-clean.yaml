@@ -1,0 +1,10 @@
+id: librispeech-dev-clean
+name: "LibriSpeech dev-clean (OpenSLR 12)"
+url: "https://www.openslr.org/resources/12/dev-clean.tar.gz"
+landing_page: "https://www.openslr.org/12/"
+license: CC-BY-4.0
+license_evidence: "OpenSLR 12 (R03 §3, R04 §1.1)"
+role: train
+attribution: "Panayotov, V., Chen, G., Povey, D., Khudanpur, S. LibriSpeech: an ASR corpus based on public domain audio books. OpenSLR 12. CC BY 4.0."
+native_sr: 16000
+access: http_tar_stream
