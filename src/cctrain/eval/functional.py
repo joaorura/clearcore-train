@@ -28,7 +28,7 @@ from cctrain.data.features import SR, extract_features
 from cctrain.data.manifest import FileRecord
 from cctrain.data.mix import MixKind, crop_or_pad, loop_to_length, make_mixture, mix_rng
 from cctrain.data.resample import to_16k
-from cctrain.eval.gates import GatesError, load_gates, verify_frozen
+from cctrain.eval.gates import GATES_V2, GatesError, load_gates, verify_frozen
 from cctrain.eval.runtime_path import (
     HOP,
     LOOKAHEAD,
@@ -324,8 +324,8 @@ def tract_runtime(asset: Path, workdir: Path) -> Runtime:
 
 
 def functional_gate(ckpt: Path, dev_mixtures: Sequence[DevMixture], *, path: PathName = "offline",
-                    runtime: Runtime | None = None, base=None, resamples: int = 10_000, seed: int = 0
-                    ) -> GateResult:
+                    runtime: Runtime | None = None, base=None, resamples: int = 10_000, seed: int = 0,
+                    workers: int = 1) -> GateResult:
     """ΔSI-SDR (estágio C − DFNet3) por mistura, no caminho `path`, com IC 95% por falante. `passed` é o nível do
     M1 (`gates-v1.m1.functional`): limite inferior do IC > `delta_si_sdr_ci_lower_gt`."""
     from cctrain.models.dfnet3_upstream import load_upstream_dfnet3
@@ -346,10 +346,8 @@ def functional_gate(ckpt: Path, dev_mixtures: Sequence[DevMixture], *, path: Pat
     gen.load_state_dict(load_checkpoint(Path(ckpt)).model)
     gen.eval()
     model = PDFNet3(base, gen).eval()
-    level = float(load_gates().m1["functional"]["delta_si_sdr_ci_lower_gt"])
-    deltas, spk, b_all, c_all = [], [], [], []
-    stage_counts = np.zeros(len(Stage))
-    for m in dev_mixtures:
+    level = float(load_gates(GATES_V2).m1["functional"]["delta_si_sdr_ci_lower_gt"])
+    def measure(m: DevMixture) -> tuple[float, float, str, np.ndarray]:
         n = len(m.clean)
         if path == "offline":
             yb, _ = enhance_offline(base, m.noisy)
@@ -361,8 +359,19 @@ def functional_gate(ckpt: Path, dev_mixtures: Sequence[DevMixture], *, path: Pat
             rc = runtime(m.noisy, film_vector(gen, m.embedding))
             yb, yc = _aligned(rb.audio, RUNTIME_DELAY, n), _aligned(rc.audio, RUNTIME_DELAY, n)
             st = rc.stages
-        sb, sc = si_sdr(yb, m.clean), si_sdr(yc, m.clean)
-        b_all.append(sb), c_all.append(sc), deltas.append(sc - sb), spk.append(m.speaker)
+        return si_sdr(yb, m.clean), si_sdr(yc, m.clean), m.speaker, st
+
+    if path == "replica" and workers > 1:  # o runtime é um subprocesso (tract-check): threads bastam
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(workers) as ex:
+            rows = list(ex.map(measure, dev_mixtures))
+    else:
+        rows = [measure(m) for m in dev_mixtures]
+    deltas, spk, b_all, c_all = [], [], [], []
+    stage_counts = np.zeros(len(Stage))
+    for sb, sc, speaker, st in rows:
+        b_all.append(sb), c_all.append(sc), deltas.append(sc - sb), spk.append(speaker)
         stage_counts += np.bincount(st.astype(np.int64), minlength=len(Stage))[: len(Stage)]
     mean, lo, hi = speaker_bootstrap(deltas, spk, resamples=resamples, seed=seed)
     fractions = {s.name.lower(): float(stage_counts[int(s)] / stage_counts.sum()) for s in Stage}

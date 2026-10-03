@@ -22,7 +22,6 @@ from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Protocol
 
 import numpy as np
 import psutil
@@ -57,6 +56,7 @@ from cctrain.train.checkpoint import (
     restore_rng,
     save_checkpoint,
 )
+from cctrain.train.embed_bank import EmbeddingBank
 
 HOP = 480
 NYQUIST_HZ = 24_000.0
@@ -70,34 +70,6 @@ _TRAIN_SPLITS = ("noise", "rir", "train", "pilot")
 
 class BaseDriftError(RuntimeError):
     """O `state_dict` da base mudou durante o estágio C (spec §5.3: hash antes == depois)."""
-
-
-class EmbeddingBank(Protocol):
-    """Banco de embeddings pré-computado (spec §4.4): ~20 variantes de enrollment por falante de treino, só os 192-d."""
-
-    def speakers(self) -> Sequence[str]: ...
-
-    def sample(self, speaker_key: str, rng: np.random.Generator) -> np.ndarray: ...
-
-
-class ArrayEmbeddingBank:
-    def __init__(self, variants: Mapping[str, np.ndarray]):
-        self._v = {k: np.asarray(v, np.float32).reshape(-1, 192) for k, v in variants.items()}
-
-    def speakers(self) -> list[str]:
-        return sorted(self._v)
-
-    def sample(self, speaker_key: str, rng: np.random.Generator) -> np.ndarray:
-        v = self._v[speaker_key]
-        return v[int(rng.integers(len(v)))]
-
-    def save(self, path: Path) -> None:
-        np.savez(path, **{k: v for k, v in self._v.items()})
-
-    @classmethod
-    def load(cls, path: Path) -> ArrayEmbeddingBank:
-        with np.load(path) as z:
-            return cls({k: z[k] for k in z.files})
 
 
 @dataclass(frozen=True)
@@ -353,7 +325,13 @@ def _run(cfg: StageCConfig, bank: EmbeddingBank, max_minutes: float, data: Stage
     elif log_path.exists():
         log_path.unlink()
 
-    t_start, last_ckpt, step_times, pss_max, vram_peak = time.monotonic(), time.monotonic(), [], 0, 0
+    # o orçamento de tempo é do run inteiro: o tempo gasto antes de uma retomada conta (guardado no checkpoint)
+    spent_before = float(ck.extra.get("elapsed_s", 0.0)) if ck is not None else 0.0
+    t_start, last_ckpt, step_times, pss_max, vram_peak, vram_reserved = (
+        time.monotonic(), time.monotonic(), [], 0, 0, 0)
+
+    def elapsed() -> float:
+        return spent_before + (time.monotonic() - t_start)
     last_path = ck.path if ck else None
     done = cfg.max_steps is not None and step >= cfg.max_steps
     if device.startswith("cuda"):
@@ -362,7 +340,7 @@ def _run(cfg: StageCConfig, bank: EmbeddingBank, max_minutes: float, data: Stage
     def save(final: bool = False) -> Path:
         return save_checkpoint(ckpt_dir, step=step, model=gen.state_dict(), optimizer=opt, scheduler=sched,
                                sampler_state={"epoch": epoch, "batch": batch_idx}, cfg_hash=chash, commit=commit,
-                               extra={"base_sha256": sha_before, "final": final})
+                               extra={"base_sha256": sha_before, "final": final, "elapsed_s": elapsed()})
 
     with open(log_path, "a") as log:
         while not done:
@@ -396,8 +374,7 @@ def _run(cfg: StageCConfig, bank: EmbeddingBank, max_minutes: float, data: Stage
                 log.flush()
                 if step % max(cfg.probe_every, 1) == 0 or step == 1:
                     pss_max = max(pss_max, total_pss())
-                if (cfg.max_steps is not None and step >= cfg.max_steps) or (
-                        time.monotonic() - t_start >= max_minutes * 60.0):
+                if (cfg.max_steps is not None and step >= cfg.max_steps) or elapsed() >= max_minutes * 60.0:
                     done = True
                     break
                 if time.monotonic() - last_ckpt >= cfg.checkpoint_every_min * 60.0:
@@ -408,6 +385,7 @@ def _run(cfg: StageCConfig, bank: EmbeddingBank, max_minutes: float, data: Stage
     pss_max = max(pss_max, total_pss())
     if device.startswith("cuda"):
         vram_peak = torch.cuda.max_memory_allocated(device)
+        vram_reserved = torch.cuda.max_memory_reserved(device)
     sha_after = assert_base_unchanged(base, sha_before)
     last_path = save(final=True)
     limit = load_budget().loader_rss_gb_max
@@ -416,6 +394,7 @@ def _run(cfg: StageCConfig, bank: EmbeddingBank, max_minutes: float, data: Stage
              "segment_s": cfg.segment_s, "steps": step, "device": device,
              "s_per_step_median": statistics.median(step_times) if step_times else None,
              "vram_peak_allocated_gb": vram_peak / GIB if vram_peak else None,
+             "vram_peak_reserved_gb": vram_reserved / GIB if vram_reserved else None,
              "note": "PSS somado do trainer e dos workers do loader (psutil), amostrado a cada "
                      f"{cfg.probe_every} passos"}
     _atomic_json(runs / "m1" / PROBE_NAME, probe)
@@ -423,7 +402,7 @@ def _run(cfg: StageCConfig, bank: EmbeddingBank, max_minutes: float, data: Stage
         "run_id": cfg.run_id, "steps": step, "epoch": epoch, "base_sha256_before": sha_before,
         "base_sha256_after": sha_after, "trainable_params": sum(p.numel() for p in trainable), "config_hash": chash,
         "commit": commit, "config": {k: str(v) if isinstance(v, Path) else v for k, v in asdict(cfg).items()},
-        "elapsed_s": time.monotonic() - t_start, "last_checkpoint": last_path.name,
+        "elapsed_s": time.monotonic() - t_start, "elapsed_s_total": elapsed(), "last_checkpoint": last_path.name,
     })
     return last_path
 
@@ -441,45 +420,6 @@ def _atomic_json(path: Path, obj: dict) -> None:
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(obj, indent=2, sort_keys=True) + "\n")
     os.replace(tmp, path)
-
-
-# --- banco do piloto ---------------------------------------------------------------------------------------------------
-
-
-def build_pilot_bank(embed: Callable[[np.ndarray], np.ndarray], speech: Sequence[FileRecord], data_root: Path, *,
-                     variants: int = 4, seed: int = 0, splits: Sequence[str] = _TRAIN_SPLITS) -> ArrayEmbeddingBank:
-    """Banco mínimo para o piloto/smoke: `variants` enrollments de 6-12 s por falante (sem aumentação; o banco de
-    produção, com ruído/RIR/denoise, é da Tarefa 12). `embed`: áudio 16 kHz -> 192-d L2-normalizado."""
-    from cctrain.data.enroll import EnrollmentRejected, check_enrollment_audio
-    from cctrain.data.resample import to_16k
-
-    by: dict[str, list[FileRecord]] = defaultdict(list)
-    for r in speech:
-        if r.split in splits and r.speaker_key:
-            by[r.speaker_key].append(r)
-    out: dict[str, list[np.ndarray]] = {}
-    for key in sorted(by):
-        rng = np.random.default_rng([seed, len(out)])
-        pool = by[key]
-        for _ in range(variants * 6):
-            if len(out.get(key, [])) >= variants:
-                break
-            want = float(rng.uniform(6.0, 12.0))
-            parts, total = [], 0.0
-            for k in rng.permutation(len(pool)):
-                x, sr = load_audio(Path(data_root) / pool[int(k)].path)
-                x16 = to_16k(x, sr)
-                parts += [x16, np.zeros(int(rng.uniform(0.15, 0.40) * 16_000), np.float32)]
-                total += len(x16) / 16_000 + 0.3
-                if total >= want:
-                    break
-            audio = np.concatenate(parts)[: int(want * 16_000)].astype(np.float32)
-            try:
-                check_enrollment_audio(audio)
-            except EnrollmentRejected:
-                continue
-            out.setdefault(key, []).append(np.asarray(embed(audio), np.float32))
-    return ArrayEmbeddingBank({k: np.stack(v) for k, v in out.items()})
 
 
 def enrollment_embedder(model: nn.Module, device: str = "cpu") -> Callable[[np.ndarray], np.ndarray]:

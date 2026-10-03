@@ -12,8 +12,8 @@ from cctrain.data.mix import MixKind
 from cctrain.hashing import sha256_file
 from cctrain.models.film import FilmGenerator, load_film_config
 from cctrain.train.checkpoint import load_latest
+from cctrain.train.embed_bank import ArrayEmbeddingBank
 from cctrain.train.stage_c import (
-    ArrayEmbeddingBank,
     BaseDriftError,
     StageCConfig,
     StageCData,
@@ -222,3 +222,22 @@ def test_freeze_base_freezes_params_and_keeps_rnn_in_train_mode_for_cudnn_backwa
     assert all(m.training for m in base.modules() if isinstance(m, torch.nn.RNNBase))
     assert not any(m.training for m in base.modules() if isinstance(m, torch.nn.modules.batchnorm._BatchNorm))
     assert state_dict_sha256(base) == before
+
+
+def test_time_budget_counts_the_time_already_spent_before_a_resume(corpus, tmp_path):
+    """Rodada longa retomável (M1 Tarefa 12): `max_minutes` é o orçamento total do run, não de cada processo."""
+    root, data, bank = corpus
+    cfg = _cfg(tmp_path, max_steps=3, data_root=root, steps_per_epoch=10)
+    first = run_stage_c(cfg, bank, max_minutes=10, data=data)
+    spent = load_latest(first.parent).extra["elapsed_s"]
+    assert spent > 0
+    resumed = run_stage_c(replace(cfg, max_steps=100), bank, max_minutes=spent / 120.0, data=data)  # < já gasto
+    assert load_latest(resumed.parent).step == 4  # um passo (a checagem vem depois do passo) e para
+    summary = json.loads((tmp_path / "m1" / cfg.run_id / "summary.json").read_text())
+    assert summary["elapsed_s_total"] > spent
+
+
+def test_probe_records_the_reserved_vram_for_the_budget_check(trained):
+    cfg, _, out = trained
+    probe = json.loads((out / "m1" / "stage-c-probe.json").read_text())
+    assert "vram_peak_reserved_gb" in probe  # None na CPU; em CUDA entra no nível `budget.vram.batch16_reserved_gb_max`
