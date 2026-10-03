@@ -88,14 +88,26 @@ def deviation_metrics(offline_audio: np.ndarray, offline_stages, runtime: Replic
     diff = rt[:n] - off[:n]
     valid = runtime.stages[LOOKAHEAD:] != int(Stage.SILENT)
     agree = stages[: valid.size][valid] == runtime.stages[LOOKAHEAD:][valid]
+    d_e, s_e = float(np.sum(diff.astype(np.float64) ** 2)), float(np.sum(rt[:n].astype(np.float64) ** 2))
     return {
         "max_abs_diff": float(np.max(np.abs(diff))),
-        "error_to_signal_db": float(10 * np.log10(max(np.mean(diff.astype(np.float64) ** 2), 1e-30)
-                                                   / max(np.mean(rt[:n].astype(np.float64) ** 2), 1e-20))),
+        "error_to_signal_db": float(10 * np.log10(max(d_e / n, 1e-30) / max(s_e / n, 1e-20))),
+        "diff_energy": d_e, "signal_energy": s_e,
         "stage_agreement": float(np.mean(agree)),
         "stage_agreement_frames": int(valid.sum()),
         "silent_fraction_excluded": float(1.0 - np.mean(valid)),
     }
+
+
+def pool_deviation(per_mixture: Sequence[Mapping]) -> dict:
+    """Junta as medidas de várias misturas: erro/sinal pela razão das energias somadas, concordância pelos quadros."""
+    d_e = sum(m["diff_energy"] for m in per_mixture)
+    s_e = sum(m["signal_energy"] for m in per_mixture)
+    frames = sum(m["stage_agreement_frames"] for m in per_mixture)
+    agree = sum(m["stage_agreement"] * m["stage_agreement_frames"] for m in per_mixture) / max(frames, 1)
+    return {"error_to_signal_db": float(10 * np.log10(max(d_e, 1e-30) / max(s_e, 1e-20))),
+            "stage_agreement": float(agree), "stage_agreement_frames": int(frames),
+            "max_abs_diff": float(max(m["max_abs_diff"] for m in per_mixture)), "mixtures": len(per_mixture)}
 
 
 # --- métricas ----------------------------------------------------------------------------------------------------

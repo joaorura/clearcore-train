@@ -20,6 +20,7 @@ from cctrain.eval.functional import (
     enhance_offline,
     functional_gate,
     load_deviation_levels,
+    pool_deviation,
     read_librispeech_sex,
     si_sdr,
     speaker_bootstrap,
@@ -68,6 +69,16 @@ def test_deviation_metrics_on_identical_runtime_and_offline():
     rt = ReplicaResult(rt_audio, np.zeros(n_frames, np.float32), stages.copy())
     m = deviation_metrics(off, torch.from_numpy(stages.astype(np.int64))[None], rt)
     assert m["stage_agreement"] == 1.0 and m["error_to_signal_db"] < -100
+
+
+def test_pool_deviation_weights_by_energy_and_frames():
+    a = {"diff_energy": 1.0, "signal_energy": 100.0, "stage_agreement": 1.0, "stage_agreement_frames": 100,
+         "max_abs_diff": 0.1}
+    b = {"diff_energy": 9.0, "signal_energy": 100.0, "stage_agreement": 0.5, "stage_agreement_frames": 300,
+         "max_abs_diff": 0.2}
+    p = pool_deviation([a, b])
+    assert abs(p["error_to_signal_db"] - 10 * math.log10(10.0 / 200.0)) < 1e-9
+    assert abs(p["stage_agreement"] - (100 * 1.0 + 300 * 0.5) / 400) < 1e-12 and p["max_abs_diff"] == 0.2
 
 
 # --- métricas ---
