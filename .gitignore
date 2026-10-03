@@ -2,8 +2,8 @@
 __pycache__/
 .pytest_cache/
 .ruff_cache/
-data/
-runs/
-delivery/
-build/
+/data/
+/runs/
+/delivery/
+/build/
 tools/tract-check/target/

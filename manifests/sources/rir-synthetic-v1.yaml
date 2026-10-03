@@ -1,0 +1,10 @@
+id: rir-synthetic-v1
+name: "RIR sintéticas (image source via pyroomacoustics), geradas por cctrain"
+url: "local:scripts/gen_rir_pilot.py"
+landing_page: "local"
+license: LicenseRef-cctrain-generated
+license_evidence: "Gerado por este repositório, sem dados de terceiros (spec §4.2; decisão de planejamento 6)"
+role: train
+attribution: "clearcore-train"
+native_sr: 48000
+access: generated
