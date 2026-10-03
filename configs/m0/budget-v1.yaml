@@ -1,0 +1,16 @@
+# Níveis do go/no-go do orçamento no M0 (decisão de planejamento 14), pré-registrados antes das medições.
+version: 1
+disk:
+  reserve_gb: 10.0
+vram:
+  batch16_reserved_gb_max: 7.0
+ram:
+  loader_rss_gb_max: 6.0
+t3:
+  # R02 §4.2: 15-30 épocas, 10-25 min por época de 100 h; spec §5.5: T3 15-35 h.
+  epochs: 20
+  hours_audio_per_epoch: 100.0
+  segment_s: 3.0
+  batch: 16
+  go_hours_max: 35.0
+  caveat_hours_max: 70.0

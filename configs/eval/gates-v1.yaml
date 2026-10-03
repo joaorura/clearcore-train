@@ -1,0 +1,100 @@
+# Níveis de exigência pré-registrados (spec §7.1-§7.2, §3.1, §5.3; R06 §4). Congelado pelo SHA-256 em
+# gates-v1.sha256. Mudar qualquer nível exige gates-v2.yaml com justificativa escrita no relatório.
+# O dev só calibra os parâmetros de medida listados em calibrated_in_dev, nunca um nível.
+version: 1
+spec: "docs/superpowers/specs/2026-10-03-clearcore-train-pdfnet3-enrollment-design.md (rev. 2)"
+statistics:
+  bootstrap: {unit: speaker, paired: true, resamples: 10000, ci: 0.95}
+calibrated_in_dev: [vad_threshold, evaluator_cosine_threshold_at_eer, tsos_config]
+runtime_path:
+  thresholds_db: {min_db_thresh: -10.0, max_db_erb_thresh: 30.0, max_db_df_thresh: 20.0}
+  atten_lim_db: null
+  replica_parity: {abs_tol: 1.0e-4, rel_tol: 1.0e-4, frames: 1000}
+gates:
+  G0:
+    class: B
+    notes: "contrato/paridade; inclui I1-I3, P1-P2 e o hash do config.ini"
+    criteria:
+      contract: {sr: 48000, hop: 480, fft: 960, nb_erb: 32, nb_df: 96, df_order: 5, df_lookahead: 2,
+                 conv_lookahead: 2, latency_samples: 1440, film_hidden: 256, film_inputs: 4}
+      config_ini_sha256: "415eb925d44990d938fb739f514aa3662c1ec0ea836cff044fa1291b82cb4290"
+      i1_max_abs_diff: 0.0
+      i2_max_abs_diff: 0.0
+      i3_max_abs_diff: 0.0
+      p1: {atol: 1.0e-5, rtol: 1.0e-6}
+      p2: {abs_tol: 1.0e-4, rel_tol: 1.0e-4, frames: 1000, lsnr_range_db: [-10.0, 20.0]}
+      film_limits: {gamma_min: 0.001, gamma_max: 100.0, beta_min: -50.0, beta_max: 50.0, finite: true}
+  G1:
+    class: B
+    notes: "modo sem perfil; estágio C bit-exato (I1+I2), estágio F com margens"
+    criteria:
+      stage_c: {i1_max_abs_diff: 0.0, i2_max_abs_diff: 0.0}
+      stage_f: {delta_stoi_min: -0.003, delta_si_sdr_db_min: -0.5, delta_dnsmos_ovrl_min: -0.05,
+                delta_dnsmos_sig_min: -0.05, delta_dnsmos_bak_min: -0.07, delta_lsd_above_8k_db_max: 0.5}
+  G2:
+    class: B
+    notes: "falante concorrente; reportado por corpus do alvo"
+    criteria: {conditions: [C3, C4], sir_db_max: 5.0, enrollment_s: [6, 10], delta_si_sdr_db_min: 3.0,
+               delta_si_sdr_ci_lower_gt: 0.0, delta_dnsmos_p_ovrl_min: 0.15, wer_ratio_to_dfnet3_max: 0.85,
+               wer_not_above_noisy: true}
+  G3:
+    class: B
+    notes: "TSOS; também por estágio de gating"
+    criteria: {tsos_max_pct: {C0: 1.0, C1_C2: 2.0, C4: 3.0}, tsos_max_over_dfnet3_pp: 0.5}
+  G3b:
+    class: M
+    criteria: {os_run_p99_ms_max: 300.0}
+  G4:
+    class: B
+    notes: "locutor trocado; atten_lim_db desligado; reportado por corpus"
+    criteria: {trr_attenuation_db: 15.0, trr_min_different_sex: 0.90, trr_min_same_sex: 0.70,
+               mode_separation_db_min: 15.0}
+  G5:
+    class: B
+    notes: "voz preservada; avaliadores independentes do encoder treinado"
+    criteria: {spk_sim_delta_ci_lower_min: -0.02, evaluators: [speechbrain-ecapa, wespeaker-resnet34],
+               acceptance_rate_not_below_dfnet3: true}
+  G5b:
+    class: M
+    criteria: {spk_sim_gain_min: 0.05}
+  G6:
+    class: B
+    criteria: {enrollment_snr_db: 5.0, enrollment_s: 6.0, reference_enrollment_s: 30.0,
+               delta_si_sdri_db_min: -1.5, tar_min: 0.97}
+  G7:
+    class: M
+    criteria: {wer_max_over_dfnet3_pp: 1.0, bound: ci_upper}
+  G8:
+    class: M
+    notes: "só se houver disco; senão 'não executado'"
+    criteria: {dnsmos_p_ovrl_min_over_dfnet3: {pn: 0.0, ps: 0.15, psn: 0.15}, sig_drop_vs_noisy_max: 0.5}
+  G9:
+    class: B
+    notes: "medido no Clearcore; o repo de treino só confirma topologia idêntica"
+    criteria: {hop_p99_ms_max: 7.0, e2e_p95_ms_max: 80.0, latency_samples: 1440, film_cost_p50_max_pct: 5.0}
+  G10:
+    class: M
+    notes: "executado pelo tract-check"
+    criteria: {duration_min: 30, nan_inf_allowed: false, level_drift_db_max: 0.5,
+               switch_discontinuity_max_x_local_std: 2.0}
+  G11:
+    class: B
+    criteria: {input_name: audio, sr: 16000, n_min: 32000, n_max: 192000, test_durations_s: [2, 6, 8, 10, 12],
+               outputs: [gamma_enc, beta_enc, gamma_df, beta_df, embedding], film_dim: 256, embedding_dim: 192,
+               opset: 13, ir_version: 8, edge_inputs: [silence, white_noise, clipping, music],
+               level_range: {rms_dbfs_min: -40.0, peak_max: 0.99}}
+m1:
+  eer_max: {librispeech_test_clean: 0.03, vctk_heldout: 0.06, cv_pt_heldout: 0.08}
+  tract_parity: {abs_tol: 1.0e-4, durations_s: [2, 6, 8, 10, 12]}
+  functional: {stage: C, same_sex: true, sir_db: 0.0, delta_si_sdr_ci_lower_gt: 0.0}
+probe_rule:
+  condition: C3
+  sir_db: 0.0
+  split: dev
+  metric: "delta_si_sdr_db (estágio C - DFNet3)"
+  ci: 0.95
+  go_ci_lower_min: 1.0
+informative:
+  saturation: {tanh_abs_threshold: 0.95, flag_fraction: 0.05}
+  gating_fractions: true
+  verification_eer_from_film_vectors: true
