@@ -1,0 +1,19 @@
+# Conjunto mínimo (spec §4.2; R04 §5; R05). Horas e tamanhos fixos vêm das pesquisas; o M0 troca os fatores
+# de bytes por hora e os tamanhos de ambiente pelos medidos.
+version: 1
+speech:
+  - {id: vctk-0.92-mic1, hours: 44.0, sr: 48000}
+  - {id: tts-portuguese, hours: 10.5, sr: 48000}
+  - {id: cml-tts-pt-cap30h, hours: 30.0, sr: 24000}
+  - {id: librispeech-cap4min, hours: 155.9, sr: 16000, note: "2338 falantes x 4 min"}
+  - {id: cv27-pt-mp3, fixed_gb: 4.85}
+noise:
+  - {id: dns-noise-fullband-cc0, hours: 10.0, sr: 48000}
+  - {id: fsd50k-eval-cc0-ccby, hours: 15.0, sr: 44100}
+rir:
+  count: 10000
+estimated_fixed_gb:
+  evaluators_whisper_dnsmos: 3.0
+  test_sets: 3.0
+  prerendered_dev_test: 3.0
+  runs_checkpoints: 2.0
