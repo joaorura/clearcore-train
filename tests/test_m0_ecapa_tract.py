@@ -1,6 +1,7 @@
 import json
 
 import numpy as np
+import onnx
 import pytest
 import torch
 
@@ -38,6 +39,10 @@ def test_enrollment_prototype_loads_and_matches_in_tract(tmp_path, m0_runs):
     for mode in ("expand", "broadcast"):
         model = build_prototype(seed=0, context_mode=mode)
         onnx_path = export_enrollment_onnx(model, tmp_path / f"enroll-{mode}.onnx")
+        proto = onnx.load(str(onnx_path))
+        # Task 14: tract recusa saída com dimensão simbólica; só a entrada pode ter N.
+        assert all(not d.dim_param for o in proto.graph.output for d in o.type.tensor_type.shape.dim)
+        assert not proto.graph.value_info
         cases = []
         for seconds in DURATIONS_S:
             for level, scale in LEVELS.items():
@@ -51,17 +56,23 @@ def test_enrollment_prototype_loads_and_matches_in_tract(tmp_path, m0_runs):
                 if rep["ok"]:
                     with torch.no_grad():
                         ref = [t.numpy() for t in model(torch.from_numpy(x)[None])]
-                    excess, limits = [], []
+                    assert len(ref) == len(OUTPUT_NAMES)
+                    excess, limits, abs_err, rel_err = [], [], [], []
                     for name, r in zip(OUTPUT_NAMES, ref):
                         got = np.asarray(rep["outputs"][name], np.float32)
+                        assert got.shape == r.shape
+                        diff = np.abs(got - r)
+                        abs_err.append(float(diff.max()))
+                        rel_err.append(float((diff / np.maximum(np.abs(r), 1e-12)).max()))
                         excess.append(float(np.max(np.abs(got - r) - (1e-4 + 1e-4 * np.abs(r)))))
                         limits.append(_within_limits(name, got))
-                    case.update(worst_excess=max(excess), within_limits=all(limits),
+                    case.update(worst_excess=max(excess), max_abs_err=max(abs_err), max_rel_err=max(rel_err),
+                                within_limits=all(limits),
                                 passed=max(excess) <= 0 and all(limits))
                 else:
                     case["passed"] = False
                 cases.append(case)
-        results[mode] = {"all_pass": all(c["passed"] for c in cases), "cases": cases}
+        results[mode] = {"outputs_concrete": True, "all_pass": all(c["passed"] for c in cases), "cases": cases}
     (m0_runs / "ecapa_tract.json").write_text(json.dumps(results, indent=2) + "\n")
     assert any(r["all_pass"] for r in results.values()), json.dumps(
         {m: [c for c in r["cases"] if not c["passed"]][:3] for m, r in results.items()}, indent=2)
