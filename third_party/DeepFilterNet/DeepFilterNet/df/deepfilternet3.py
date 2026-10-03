@@ -164,7 +164,7 @@ class Encoder(nn.Module):
         self.lsnr_offset = p.lsnr_min
 
     def forward(
-        self, feat_erb: Tensor, feat_spec: Tensor
+        self, feat_erb: Tensor, feat_spec: Tensor, film=None
     ) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
         # Encodes erb; erb should be in dB scale + normalized; Fe are number of erb bands.
         # erb: [B, 1, T, Fe]
@@ -180,7 +180,7 @@ class Encoder(nn.Module):
         cemb = self.df_fc_emb(cemb)  # [T, B, C * F/4]
         emb = e3.permute(0, 2, 3, 1).flatten(2)  # [B, T, C * F]
         emb = self.combine(emb, cemb)
-        emb, _ = self.emb_gru(emb)  # [B, T, -1]
+        emb, _ = self.emb_gru(emb, film=film)  # [B, T, -1]  # CCTRAIN-PATCH(film)
         lsnr = self.lsnr_fc(emb) * self.lsnr_scale + self.lsnr_offset
         return e0, e1, e2, e3, emb, c0, lsnr
 
@@ -320,9 +320,9 @@ class DfDecoder(nn.Module):
         self.df_out = nn.Sequential(df_out, nn.Tanh())
         self.df_fc_a = nn.Sequential(nn.Linear(self.df_n_hidden, 1), nn.Sigmoid())
 
-    def forward(self, emb: Tensor, c0: Tensor) -> Tensor:
+    def forward(self, emb: Tensor, c0: Tensor, film=None) -> Tensor:
         b, t, _ = emb.shape
-        c, _ = self.df_gru(emb)  # [B, T, H], H: df_n_hidden
+        c, _ = self.df_gru(emb, film=film)  # [B, T, H], H: df_n_hidden  # CCTRAIN-PATCH(film)
         if self.df_skip is not None:
             c = c + self.df_skip(emb)
         c0 = self.df_convp(c0).permute(0, 2, 3, 1)  # [B, T, F, O*2], channels_last
@@ -391,6 +391,8 @@ class DfNet(nn.Module):
         spec: Tensor,
         feat_erb: Tensor,
         feat_spec: Tensor,  # Not used, take spec modified by mask instead
+        film_enc=None,
+        film_df=None,
     ) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
         """Forward method of DeepFilterNet2.
 
@@ -408,7 +410,7 @@ class DfNet(nn.Module):
 
         feat_erb = self.pad_feat(feat_erb)
         feat_spec = self.pad_feat(feat_spec)
-        e0, e1, e2, e3, emb, c0, lsnr = self.enc(feat_erb, feat_spec)
+        e0, e1, e2, e3, emb, c0, lsnr = self.enc(feat_erb, feat_spec, film=film_enc)  # CCTRAIN-PATCH(film)
 
         if self.lsnr_droput:
             idcs = lsnr.squeeze() > -10.0
@@ -435,9 +437,9 @@ class DfNet(nn.Module):
 
         if self.run_df:
             if self.lsnr_droput:
-                df_coefs[:, idcs] = self.df_dec(emb, c0)
+                df_coefs[:, idcs] = self.df_dec(emb, c0, film=film_df)  # CCTRAIN-PATCH(film)
             else:
-                df_coefs = self.df_dec(emb, c0)
+                df_coefs = self.df_dec(emb, c0, film=film_df)  # CCTRAIN-PATCH(film)
             df_coefs = self.df_out_transform(df_coefs)
             spec_e = self.df_op(spec.clone(), df_coefs)
             spec_e[..., self.nb_df :, :] = spec_m[..., self.nb_df :, :]

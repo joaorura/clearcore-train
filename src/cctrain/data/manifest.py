@@ -45,7 +45,10 @@ class SourceManifest:
 
     @classmethod
     def from_yaml(cls, path: Path) -> SourceManifest:
-        data = yaml.safe_load(Path(path).read_text())
+        try:
+            data = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+        except yaml.YAMLError as exc:
+            raise ManifestError(f"{path}: YAML inválido: {exc}") from exc
         if not isinstance(data, Mapping):
             raise ManifestError(f"{path}: não é um mapeamento YAML")
         missing = [k for k in _REQUIRED if k not in data]
@@ -53,11 +56,15 @@ class SourceManifest:
             raise ManifestError(f"{path}: faltam {missing}")
         if data["id"] != Path(path).stem:
             raise ManifestError(f"{path}: id {data['id']!r} difere do nome do arquivo")
-        if not str(data["license"]).strip():
-            raise ManifestError(f"{path}: licença vazia")
+        if not isinstance(data["license"], str) or not data["license"].strip():
+            raise ManifestError(f"{path}: licença vazia ou não textual")
+        try:
+            role = Role(data["role"])
+        except ValueError as exc:
+            raise ManifestError(f"{path}: papel inválido {data['role']!r}") from exc
         return cls(
             id=data["id"], name=data["name"], url=data["url"], landing_page=data["landing_page"],
-            license=data["license"], license_evidence=data["license_evidence"], role=Role(data["role"]),
+            license=data["license"], license_evidence=data["license_evidence"], role=role,
             attribution=data["attribution"], native_sr=data["native_sr"], access=data["access"],
             artifacts=tuple(data.get("artifacts") or ()), restrictions=tuple(data.get("restrictions") or ()),
         )
@@ -95,28 +102,50 @@ class FileRecord:
             raise ManifestError(f"{self.path}: sr/num_samples inválidos")
         if self.split not in SPLITS:
             raise ManifestError(f"{self.path}: split {self.split!r} fora de {sorted(SPLITS)}")
-        Role(self.role)
+        try:
+            Role(self.role)
+        except ValueError as exc:
+            raise ManifestError(f"{self.path}: papel inválido {self.role!r}") from exc
 
     def to_dict(self) -> dict:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, d: Mapping) -> FileRecord:
+        fields = set(cls.__dataclass_fields__)
+        keys = set(d)
+        if keys != fields:
+            raise ManifestError(f"registro com chaves inválidas: faltam {sorted(fields - keys)}, sobram {sorted(keys - fields)}")
         return cls(**{k: d[k] for k in cls.__dataclass_fields__})
 
 
 def write_file_manifest(records: Iterable[FileRecord], path: Path) -> str:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    lines = [json.dumps(r.to_dict(), sort_keys=True, ensure_ascii=False) for r in sorted(records, key=lambda r: r.path)]
+    ordered = sorted(records, key=lambda r: r.path)
+    for prev, cur in zip(ordered, ordered[1:], strict=False):
+        if prev.path == cur.path:
+            raise ManifestError(f"path duplicado no manifest: {cur.path!r}")
+    lines = [json.dumps(r.to_dict(), sort_keys=True, ensure_ascii=False) for r in ordered]
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text("".join(line + "\n" for line in lines))
+    tmp.write_text("".join(line + "\n" for line in lines), encoding="utf-8")
     os.replace(tmp, path)
     return sha256_file(path)
 
 
 def read_file_manifest(path: Path) -> list[FileRecord]:
-    return [FileRecord.from_dict(json.loads(line)) for line in Path(path).read_text().splitlines() if line]
+    out = []
+    for n, line in enumerate(Path(path).read_text(encoding="utf-8").splitlines(), 1):
+        if not line:
+            continue
+        try:
+            d = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise ManifestError(f"{path}:{n}: JSON inválido: {exc}") from exc
+        if not isinstance(d, Mapping):
+            raise ManifestError(f"{path}:{n}: registro não é um objeto JSON")
+        out.append(FileRecord.from_dict(d))
+    return out
 
 
 def training_records(records: Iterable[FileRecord], sources: Mapping[str, SourceManifest]) -> list[FileRecord]:
@@ -128,12 +157,16 @@ def training_records(records: Iterable[FileRecord], sources: Mapping[str, Source
         if r.license != src.license:
             raise ManifestError(f"{r.path}: licença {r.license!r} difere da fonte ({src.license!r})")
         check_train_allowed(r.license, r.role, what=r.path)
+        if Role(r.role) is not src.role:
+            raise ManifestError(f"{r.path}: papel {r.role!r} difere do da fonte ({src.role.value!r})")
         out.append(r)
     return out
 
 
 def _read_lock(lock_path: Path) -> dict:
-    return json.loads(Path(lock_path).read_text()) if Path(lock_path).is_file() else {}
+    if not Path(lock_path).is_file():
+        return {}
+    return json.loads(Path(lock_path).read_text(encoding="utf-8"))
 
 
 def lock_entry(source_id: str, artifact: str, lock_path: Path = LOCK_PATH) -> dict | None:
@@ -154,5 +187,5 @@ def update_lock(source_id: str, artifact: str, sha256: str, size: int, *, upstre
         )
     lock.setdefault(source_id, {})[artifact] = entry
     tmp = Path(lock_path).with_name(Path(lock_path).name + ".tmp")
-    tmp.write_text(json.dumps(lock, indent=2, sort_keys=True) + "\n")
+    tmp.write_text(json.dumps(lock, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     os.replace(tmp, lock_path)
