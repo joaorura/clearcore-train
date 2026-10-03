@@ -19,6 +19,9 @@ SOURCES_DIR = repo_root() / "manifests" / "sources"
 FILES_DIR = repo_root() / "manifests" / "files"
 LOCK_PATH = repo_root() / "manifests" / "sources.lock.json"
 SPLITS = frozenset({"pilot", "test", "noise", "rir", "dev"})
+# Splits de dev/teste nunca entram no treino (spec §4.5); os demais são de uso em treino.
+NON_TRAIN_SPLITS = frozenset({"test", "dev"})
+TRAIN_SPLITS = tuple(sorted(SPLITS - NON_TRAIN_SPLITS))
 _SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 _REQUIRED = ("id", "name", "url", "landing_page", "license", "license_evidence", "role", "attribution",
              "native_sr", "access")
@@ -154,6 +157,8 @@ def training_records(records: Iterable[FileRecord], sources: Mapping[str, Source
         src = sources.get(r.source_id)
         if src is None:
             raise ManifestError(f"{r.path}: fonte {r.source_id!r} sem manifest")
+        if r.split in NON_TRAIN_SPLITS:
+            raise ManifestError(f"{r.path}: split {r.split!r} é de dev/teste e não pode entrar no treino (spec §4.5)")
         if r.license != src.license:
             raise ManifestError(f"{r.path}: licença {r.license!r} difere da fonte ({src.license!r})")
         check_train_allowed(r.license, r.role, what=r.path)

@@ -202,3 +202,61 @@ def test_integrity_error_masks_url_query(www, tmp_path):
     with pytest.raises(IntegrityError) as exc:
         stream_download(f"{base}/a.bin?X-Amz-Signature=SECRET#frag", tmp_path / "a.bin", expected_size=99)
     assert "SECRET" not in str(exc.value) and "/a.bin" in str(exc.value)
+
+
+class _FlakyHandler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+    def do_GET(self):  # noqa: N802
+        self.server.hits += 1
+        status = self.server.script[min(self.server.hits, len(self.server.script)) - 1]
+        body = b"payload" * 100 if status == 200 else b"err"
+        self.send_response(status)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+@pytest.fixture()
+def flaky(monkeypatch):
+    monkeypatch.setattr("cctrain.data.sources.BACKOFF_BASE_S", 0.01)
+    servers = []
+
+    def make(script):
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _FlakyHandler)
+        server.script, server.hits = script, 0
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        servers.append(server)
+        return server, f"http://127.0.0.1:{server.server_address[1]}/f"
+
+    yield make
+    for server in servers:
+        server.shutdown()
+        server.server_close()
+
+
+def test_stream_download_retries_429_and_5xx_then_succeeds(flaky, tmp_path):
+    server, url = flaky([429, 503, 200])
+    d = stream_download(url, tmp_path / "ok.bin")
+    assert d.size == 700 and server.hits == 3
+    assert (tmp_path / "ok.bin").read_bytes() == b"payload" * 100
+
+
+def test_stream_download_gives_up_after_three_attempts(flaky, tmp_path):
+    import requests
+
+    server, url = flaky([429])
+    with pytest.raises(requests.HTTPError):
+        stream_download(url, tmp_path / "no.bin")
+    assert server.hits == 3
+    assert not (tmp_path / "no.bin").exists() and not (tmp_path / "no.bin.part").exists()
+
+
+def test_stream_download_does_not_retry_404(flaky, tmp_path):
+    import requests
+
+    server, url = flaky([404])
+    with pytest.raises(requests.HTTPError):
+        stream_download(url, tmp_path / "no.bin")
+    assert server.hits == 1

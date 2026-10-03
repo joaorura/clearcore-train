@@ -4,7 +4,7 @@ import soundfile as sf
 
 from cctrain.data.licenses import LicenseRefused
 from cctrain.data.loader import PilotLoaderConfig, PilotMixDataset
-from cctrain.data.manifest import FileRecord
+from cctrain.data.manifest import FileRecord, ManifestError
 from cctrain.hashing import sha256_file
 
 
@@ -23,7 +23,7 @@ def corpus(tmp_path):
                      "CC-BY-4.0", spk, "pilot") for spk, sr in (("a", 48_000), ("b", 16_000), ("c", 48_000))
               for k in range(2)]
     noise = [_write(tmp_path, "n/n.flac", 0.05 * rng.standard_normal(48_000 * 4), 48_000, "noise-wikimedia-cc0",
-                    "CC0-1.0", None, "test")]
+                    "CC0-1.0", None, "noise")]
     h = np.zeros(4800)
     h[0], h[100] = 0.99, 0.3
     rirs = [_write(tmp_path, "r/r.flac", h, 48_000, "rir-synthetic-v1", "LicenseRef-cctrain-generated", None,
@@ -57,3 +57,21 @@ def test_dataset_refuses_test_only_or_single_speaker(corpus):
         PilotMixDataset(bad + speech, noise, rirs, root)
     with pytest.raises(ValueError, match="falantes"):
         PilotMixDataset([r for r in speech if r.speaker == "a"], noise, rirs, root)
+
+
+def test_dataset_filters_dev_and_test_splits_by_default(corpus):
+    root, speech, noise, rirs = corpus
+    held_out = [FileRecord(**{**speech[0].to_dict(), "speaker": "z", "split": "test"}),
+                FileRecord(**{**speech[0].to_dict(), "speaker": "y", "split": "dev"})]
+    ds = PilotMixDataset(held_out + speech, noise, rirs, root)
+    assert {r.split for r in ds.speech} == {"pilot"} and "z" not in ds.by_speaker and "y" not in ds.by_speaker
+    test_noise = [FileRecord(**{**noise[0].to_dict(), "split": "test"})]
+    with pytest.raises(ValueError, match="ruído"):
+        PilotMixDataset(speech, test_noise, rirs, root)
+
+
+def test_dataset_never_trains_on_dev_or_test_even_if_allowed_explicitly(corpus):
+    root, speech, noise, rirs = corpus
+    held_out = [FileRecord(**{**speech[0].to_dict(), "speaker": "z", "split": "test"})]
+    with pytest.raises(ManifestError, match="dev/teste"):
+        PilotMixDataset(held_out + speech, noise, rirs, root, allowed_splits=("pilot", "noise", "rir", "test"))
