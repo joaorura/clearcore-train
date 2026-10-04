@@ -615,3 +615,22 @@ def verify_freeze(data_dir: Path, freeze_path: Path = FREEZE_V1, *, deep: bool =
         if deep:
             verify_files(Path(data_dir) / h)
     return freeze
+
+
+def load_select_items(data_dir: Path | None = None) -> list:
+    """Carrega os itens do dev-select necessários para a avaliação/seleção por época (C0 e C3 com SIR 0 dB)."""
+    from cctrain.m2.select import SelectItem
+    from cctrain.paths import Paths
+
+    root = Path(data_dir) if data_dir is not None else Paths.from_env().data / "dev-m2"
+    half = open_half(root, "dev-select")
+    out = []
+    for it in half.select("C0"):
+        out.append(SelectItem("C0", it.noisy(), it.clean(), it["target_speaker"], None))
+    for it in half.select("C3", sir_db=0.0):
+        emb = half.embedding(it)
+        if emb is None:
+            raise DevSetsError(f"item {it.id} em C3 sem embedding de perfil")
+        out.append(SelectItem("C3", it.noisy(), it.clean(), it["target_speaker"], emb))
+    return out
+

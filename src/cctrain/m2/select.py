@@ -172,11 +172,15 @@ def evaluate_select(model, items: Sequence[SelectItem], *, teacher: torch.nn.Mod
 
 def make_evaluator(items: Sequence[SelectItem], teacher: torch.nn.Module):
     """`evaluator(model, epoch) -> métricas` para o trainer; a referência do DFNet3 upstream é calculada uma vez."""
-    reference = teacher_reference(items, teacher)
+    reference: list[tuple[float, float]] | None = None
 
     def evaluate(model, epoch: int) -> dict:
+        nonlocal reference
         del epoch
+        if reference is None:
+            reference = teacher_reference(items, teacher)
         with torch.no_grad():
             return evaluate_select(model, items, teacher=teacher, reference=reference)
 
     return evaluate
+
