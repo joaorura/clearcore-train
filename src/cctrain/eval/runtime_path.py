@@ -227,6 +227,118 @@ def tract_gating(asset: Path, audio: np.ndarray, out_prefix: Path, film: np.ndar
                          np.fromfile(f"{out_prefix}.stage.u8", np.uint8))
 
 
+RUNTIME_DELAY = 1440  # latência do runtime (G0: latency_samples)
+FILM_HIDDEN = 256
+
+
+def split_film(vec: np.ndarray) -> dict[str, np.ndarray]:
+    """`[gamma_enc, beta_enc, gamma_df, beta_df]`, 4 x 256 f32 (a ordem de `tract-check gating ... film.f32`)."""
+    v = np.asarray(vec, np.float32).reshape(-1)
+    if v.size != 4 * FILM_HIDDEN:
+        raise ValueError(f"vetor FiLM com {v.size} valores (esperado {4 * FILM_HIDDEN})")
+    return dict(zip(("gamma_enc", "beta_enc", "gamma_df", "beta_df"), np.split(v, 4), strict=True))
+
+
+def identity_film() -> np.ndarray:
+    return np.concatenate([np.ones(FILM_HIDDEN, np.float32), np.zeros(FILM_HIDDEN, np.float32)] * 2)
+
+
+def replica_features(audio: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Mesmas features que `run_replica` entrega ao modelo: só quadros ativos. -> (active, feat_erb, feat_spec)."""
+    from libdf import DF, erb, erb_norm, unit_norm
+
+    audio = np.asarray(audio, np.float32)
+    framed = audio[: len(audio) // HOP * HOP].reshape(-1, HOP)  # como run_replica: o resto < 1 hop é descartado
+    active = np.flatnonzero([mean_square_f32(f) >= SILENCE_MEAN_SQUARE for f in framed])
+    if active.size == 0:
+        return active, np.zeros((0, NB_ERB), np.float32), np.zeros((0, NB_DF), np.complex64)
+    state = DF(48_000, 960, HOP, NB_ERB, 2)
+    spec = state.analysis(np.ascontiguousarray(framed[active].reshape(1, -1)))
+    feat_erb = np.asarray(erb_norm(erb(spec, state.erb_widths()), NORM_ALPHA))[0]
+    feat_spec = np.asarray(unit_norm(np.ascontiguousarray(spec[..., :NB_DF]), NORM_ALPHA))[0]
+    return active, feat_erb.astype(np.float32), feat_spec
+
+
+def _film_t(a: np.ndarray, b: np.ndarray) -> tuple[Tensor, Tensor]:
+    return torch.from_numpy(a)[None, None], torch.from_numpy(b)[None, None]
+
+
+class TorchFrameModel:
+    """`FrameModel` cujo cálculo é o do PyTorch (DFNet3 + FiLM), pré-calculado e servido por quadro.
+
+    É o caminho que mede os pesos do estágio F sem o export do M3 (o tract só roda grafos exportados). O estágio de cada
+    quadro sai do lsnr do encoder (que roda sempre); os decoders só avançam nos quadros em que o runtime os executa,
+    então cada decoder roda sobre a subsequência dos quadros que o chamam, como o tract. O encoder stateful do runtime
+    equivale ao `enc` do PyTorch sobre os quadros sem `pad_feat` (a defasagem de lookahead é feita pelos anéis de
+    espectro da réplica). `vec` = `[gamma_enc, beta_enc, gamma_df, beta_df]`; `None` = FiLM neutro (γ=1, β=0).
+    """
+
+    def __init__(self, base, vec: np.ndarray | None, audio: np.ndarray, thresholds=DEFAULT_THRESHOLDS):
+        _, self.feat_erb, self.feat_spec = replica_features(audio)
+        v = split_film(identity_film() if vec is None else vec)
+        self.lsnr = np.zeros(0, np.float32)
+        self.gains: dict[int, np.ndarray] = {}
+        self.coefs: dict[int, np.ndarray] = {}
+        self.t = 0
+        if not len(self.feat_erb):
+            return
+        ferb = torch.from_numpy(np.ascontiguousarray(self.feat_erb))[None, None]
+        fspec = torch.from_numpy(np.stack([self.feat_spec.real, self.feat_spec.imag], 0).astype(np.float32))[None]
+        with torch.no_grad():
+            e0, e1, e2, e3, emb, c0, lsnr = base.enc(ferb, fspec, film=_film_t(v["gamma_enc"], v["beta_enc"]))
+            self.lsnr = lsnr.reshape(-1).numpy().astype(np.float32)
+            flags = [apply_stages(x, thresholds) for x in self.lsnr]
+            erb_idx = [t for t, f in enumerate(flags) if f[0]]
+            df_idx = [t for t, f in enumerate(flags) if f[2]]
+            if erb_idx:
+                i = torch.tensor(erb_idx)
+                m = base.erb_dec(emb[:, i], e3[:, :, i], e2[:, :, i], e1[:, :, i], e0[:, :, i])
+                self.gains = {t: m[0, 0, k].numpy().astype(np.float32) for k, t in enumerate(erb_idx)}
+            if df_idx:
+                i = torch.tensor(df_idx)
+                c = base.df_dec(emb[:, i], c0[:, :, i], film=_film_t(v["gamma_df"], v["beta_df"]))
+                c = c[0].numpy().reshape(len(df_idx), NB_DF, DF_ORDER, 2)
+                self.coefs = {t: (c[k, ..., 0] + 1j * c[k, ..., 1]).astype(np.complex64)
+                              for k, t in enumerate(df_idx)}
+
+    def reset(self) -> None:
+        self.t = 0
+
+    def encode(self, feat_erb: np.ndarray, feat_spec: np.ndarray) -> EncoderStep:
+        t = self.t
+        assert np.array_equal(np.asarray(feat_erb, np.float32), self.feat_erb[t]), f"features desalinhadas em {t}"
+        assert np.array_equal(np.asarray(feat_spec), np.stack([self.feat_spec[t].real, self.feat_spec[t].imag], -1))
+        self.t += 1
+        return EncoderStep(np.float32(self.lsnr[t]), {"t": t})
+
+    def erb_decode(self, step: EncoderStep) -> np.ndarray:
+        return self.gains[step.tensors["t"]]
+
+    def df_decode(self, step: EncoderStep) -> np.ndarray:
+        return self.coefs[step.tensors["t"]]
+
+
+def align_runtime(audio: np.ndarray, n: int, delay: int = RUNTIME_DELAY) -> np.ndarray:
+    """Remove a latência do runtime (1.440 amostras) e ajusta ao comprimento `n` da entrada."""
+    est = np.asarray(audio, np.float32)[delay:]
+    return np.concatenate([est, np.zeros(max(0, n - est.size), np.float32)])[:n]
+
+
+def runtime_forward(model, film: np.ndarray | None, noisy: np.ndarray, thresholds=DEFAULT_THRESHOLDS
+                    ) -> tuple[np.ndarray, np.ndarray]:
+    """Caminho do runtime em Python (réplica quadro a quadro de `DfTract::process` com FiLM e gating §3.5).
+
+    `model`: DFNet3/pDFNet3 PyTorch (aceita `PDFNet3`: usa `.base`), `film`: vetor `[γ_enc, β_enc, γ_df, β_df]`
+    (4 x 256) ou `None` (sem perfil, FiLM neutro). `noisy`: mono 48 kHz. Devolve `(enh, stage_per_frame)`: `enh` com o
+    comprimento da entrada e a latência de 1.440 amostras já removida (alinhada à entrada); `stage_per_frame` (uint8,
+    `Stage`) é indexado pelos quadros da entrada. Paridade com o `tract-check gating`: `tests/test_eval_runtime_replica.py`.
+    """
+    base = getattr(model, "base", model)
+    audio = np.asarray(noisy, np.float32).reshape(-1)
+    res = run_replica(audio, TorchFrameModel(base, film, audio, thresholds), thresholds)
+    return align_runtime(res.audio, audio.size), res.stages
+
+
 def emulate_gating_offline(spec_noisy: Tensor, spec_masked: Tensor, spec_enhanced: Tensor, lsnr: Tensor,
                            thresholds=DEFAULT_THRESHOLDS) -> tuple[Tensor, Tensor]:
     lo, hi_erb, hi_df = (float(t) for t in thresholds)
