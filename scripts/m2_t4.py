@@ -2,7 +2,8 @@
 
 render     pré-renderiza o dev em duas metades disjuntas por fala (dev-select, dev-gate) em `data/dev-m2/` (CPU).
 freeze     confere disjunção + SHA-256 de todos os arquivos e grava `configs/eval/m2-devsets-v1.freeze.json` (vai ao git).
-calibrate  calibra `tsos_config` (amplitude_scale) no dev-select, com o DFNet3 upstream em C0c; grava `tsos-config-v1.yaml`.
+calibrate  mede o DFNet3 upstream por condição no dev-select (TSOS na convenção fixa: float, escala 1) e compara com a faixa do
+           baseline do paper na condição certa (TS3 = C0c); congela `tsos-config-v1.yaml` só se plausível, senão pede decisão do dono.
 smoke      avaliação de fumaça no dev-select (estágio C do M1, caminhos offline e réplica do runtime). Nunca abre o dev-gate.
 Só dev; o dev-gate não é lido por nenhum comando daqui (`open_half` o recusa sem `final_gate=True`).
 """
@@ -81,6 +82,10 @@ def cmd_freeze(a) -> None:
     freeze = ds.make_freeze(out)
     freeze["disjointness"] = counts
     freeze["files_verified"] = files
+    sp = json.loads((out / "speakers.json").read_text())
+    freeze["speakers"] = {k: sp[k] for k in ("total", "kept", "excluded", "kept_by_corpus", "kept_by_sex",
+                                             "excluded_by_corpus", "excluded_by_sex", "excluded_by_corpus_sex")}
+    freeze["speakers_sha256"] = sha256_file(out / "speakers.json")
     freeze["by_half"] = {h: {c: len(half.select(c)) for c in ds.CONDITIONS}
                          for h, half in (("dev-select", sel), ("dev-gate", gate))}
     path = Path(a.freeze) if a.freeze else ds.FREEZE_V1
@@ -110,44 +115,65 @@ def cmd_calibrate(a) -> None:
     from cctrain.eval.functional import enhance_offline
     from cctrain.eval.runtime_path import align_runtime
     from cctrain.m2 import devsets as ds
-    from cctrain.m2.tsos_calib import ANCHOR_PCT, PAPER_BASELINE_TS3_PCT, calibrate_amplitude_scale
+    from cctrain.m2.tsos_calib import (
+        CONVENTION,
+        GATING_CONDITION,
+        OWNER_DECISION,
+        PAPER_BASELINE_PCT,
+        PLAUSIBILITY_FACTOR,
+        measure_tsos,
+        plausibility,
+    )
 
     half = ds.open_half(dev_dir(a), "dev-select")  # SÓ o dev-select
     base, _ = load_base_and_generator()
-    items = half.select("C0c")
-    log(f"calibração: {len(items)} itens C0c do dev-select, DFNet3 upstream (caminho offline)")
-    pairs, spk = [], []
-    for k, it in enumerate(items):
-        x = it.noisy()
-        y, _ = enhance_offline(base, x)
-        pairs.append((align_runtime(y, x.size, delay=480), it.clean()))
-        spk.append(it["target_speaker"])
-        if k % 20 == 0:
-            log(f"  {k}/{len(items)}")
-    res = calibrate_amplitude_scale(pairs, spk, SR)
-    res.update({"split": "dev-select", "condition": "C0c", "n_items": len(items), "n_speakers": len(set(spk)),
-                "model": "dfnet3-upstream-v0.5.6 (offline, gating emulado)",
-                "paper_baseline_ts3_pct": PAPER_BASELINE_TS3_PCT, "anchor_pct": ANCHOR_PCT,
-                "dev_items_sha256": sha256_file(dev_dir(a) / "dev-select" / "items.jsonl")})
+    measured, detail = {}, {}
+    for cond in ("C0c", "C0", "C3", "C4"):
+        items = half.select(cond)
+        if a.max_items:
+            items = items[:: max(1, len(items) // a.max_items)]
+        log(f"medição {cond}: {len(items)} itens do dev-select, DFNet3 upstream (caminho offline), convenção fixa")
+        pairs, spk = [], []
+        for k, it in enumerate(items):
+            x = it.noisy()
+            y, _ = enhance_offline(base, x)
+            pairs.append((align_runtime(y, x.size, delay=480), it.clean()))
+            spk.append(it["target_speaker"])
+            if k % 40 == 0:
+                log(f"  {cond} {k}/{len(items)}")
+        measured[cond] = measure_tsos(pairs, spk, SR, CONVENTION)
+        detail[cond] = {"n_items": len(items), "n_speakers": len(set(spk))}
+    rep = plausibility(measured)
+    for c, d in detail.items():
+        rep["conditions"][c].update(d)
+    res = {"split": "dev-select", "model": "dfnet3-upstream-v0.5.6 (offline, gating emulado)",
+           "convention": {"amplitude_scale": CONVENTION.amplitude_scale, "p": CONVENTION.p, "gamma": CONVENTION.gamma,
+                          "win_ms": CONVENTION.win_ms, "hop_ms": CONVENTION.hop_ms, "audio": "float [-1, 1]"},
+           "paper_baseline_dccrn_non_personalized_pct_icr_vctk": PAPER_BASELINE_PCT, "plausibility_factor": PLAUSIBILITY_FACTOR,
+           "plausibility": rep, "dev_items_sha256": sha256_file(dev_dir(a) / "dev-select" / "items.jsonl")}
+    summary = ", ".join(f"{c} {v['tsos_pct']:.2f}% [{v['status']}]" for c, v in rep["conditions"].items())
     if a.dev_dir:  # ensaio em outro diretório: não congela nada
         save("t4_tsos_calibration_dry.json", res)
-        log(f"ensaio: amplitude_scale {res['chosen_amplitude_scale']} (TSOS {res['chosen_tsos_pct']:.2f}%)")
+        log(f"ensaio: {summary}")
         return
     save("t4_tsos_calibration.json", res)
-    scale = res["chosen_amplitude_scale"]
+    log(f"TSOS do DFNet3 (convenção fixa): {summary}")
+    if not rep["freeze"]:
+        log(f"NÃO congelado: DFNet3 em {GATING_CONDITION} muito fora da faixa do paper. {OWNER_DECISION}")
+        return
     TSOS_YAML.write_text(
-        "# tsos_config calibrado no dev (gates-v2.calibrated_in_dev), versão 1. Congelado pelo SHA-256 em tsos-config-v1.sha256\n"
-        "# ANTES de qualquer leitura do G3. Procedimento e tabela completa: docs/plans/m2-reports/t4.md e\n"
-        "# cctrain.m2.tsos_calib (âncora: DFNet3 upstream em C0c do dev-select ~ baseline não personalizado do paper).\n"
-        "# Os níveis do G3 não mudam. p, gamma e a STFT são os do paper/DeepFilterNet; só amplitude_scale foi calibrada.\n"
+        "# tsos_config v1: convenção FIXA (nada foi calibrado): áudio float [-1, 1], amplitude_scale 1, p e gamma do paper, STFT 20/10 ms\n"
+        "# (a do DeepFilterNet). Congelado pelo SHA-256 em tsos-config-v1.sha256 ANTES de qualquer leitura do G3. O DFNet3 upstream foi\n"
+        "# MEDIDO no dev-select (plausibilidade contra a faixa do baseline do paper na condição certa): docs/plans/m2-reports/t4.md.\n"
+        "# Os níveis do G3 não mudam.\n"
         "version: 1\n"
-        f"calibrated_on: {{split: dev-select, condition: C0c, model: dfnet3-upstream-v0.5.6, items: {len(items)}, "
-        f"anchor_pct: {ANCHOR_PCT:.3f}, tsos_pct_at_choice: {res['chosen_tsos_pct']:.3f}, "
+        f"plausibility: {{split: dev-select, gating_condition: {GATING_CONDITION}, "
+        f"dfnet3_tsos_pct: {json.dumps({c: round(v['tsos_pct'], 3) for c, v in rep['conditions'].items()})}, "
         f"dev_select_items_sha256: {res['dev_items_sha256']}}}\n"
-        "config:\n  p: 0.3\n  gamma: 0.1\n  win_ms: 20.0\n  hop_ms: 10.0\n"
-        f"  amplitude_scale: {scale!r}\n")
+        f"config:\n  p: {CONVENTION.p}\n  gamma: {CONVENTION.gamma}\n  win_ms: {CONVENTION.win_ms}\n  hop_ms: {CONVENTION.hop_ms}\n"
+        f"  amplitude_scale: {CONVENTION.amplitude_scale}\n")
     (TSOS_YAML.with_suffix(".sha256")).write_text(f"{sha256_file(TSOS_YAML)}  {TSOS_YAML.name}\n")
-    log(f"escolha: amplitude_scale {scale} (TSOS DFNet3 {res['chosen_tsos_pct']:.2f}% vs âncora {ANCHOR_PCT:.2f}%)")
+    log(f"convenção congelada em {TSOS_YAML}")
 
 
 def cmd_smoke(a) -> None:
@@ -165,7 +191,11 @@ def cmd_smoke(a) -> None:
     half = ds.open_half(dev_dir(a), "dev-select")
     base, gen = load_base_and_generator()
     model = PDFNet3(base, gen).eval()
-    tsos_cfg = load_tsos_config() if not a.dev_dir else TsosConfig(amplitude_scale=0.5)  # ensaio: escala qualquer
+    from cctrain.m2.tsos_calib import CONVENTION
+
+    tsos_cfg = CONVENTION  # convenção fixa (float, escala 1); o yaml congelado, se existir, tem de coincidir
+    if not a.dev_dir and TSOS_YAML.exists():
+        assert load_tsos_config() == TsosConfig(**{k: getattr(CONVENTION, k) for k in ("p", "gamma", "win_ms", "hop_ms", "amplitude_scale")})
     n = a.n
     rng = np.random.default_rng(0)
 
@@ -260,6 +290,7 @@ def main() -> None:
     f.add_argument("--freeze", default="")
     c = sub.add_parser("calibrate")
     c.add_argument("--dev-dir", default="", help="ensaio em outro diretório (não congela nada)")
+    c.add_argument("--max-items", type=int, default=0, help="limita itens por condição (0 = todos)")
     s = sub.add_parser("smoke")
     s.add_argument("--n", type=int, default=12)
     s.add_argument("--dev-dir", default="")

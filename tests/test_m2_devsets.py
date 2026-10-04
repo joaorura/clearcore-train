@@ -127,7 +127,8 @@ def test_halves_disjoint_by_utterance_and_noise_and_enrollment_rule(built):
     sel, gate = ds.open_half(out, "dev-select"), ds.open_half(out, "dev-gate", final_gate=True, who="test")
     counts = ds.check_disjoint_and_enrollment_rule(sel, gate)
     assert counts["utterances_select"] > 0 and counts["utterances_gate"] > 0
-    assert set(summary) == {"dev-select", "dev-gate"}
+    assert set(summary) == {"dev-select", "dev-gate", "speakers"}
+    assert set(sel.enrollments) == set(gate.enrollments)  # mesmo conjunto de falantes nas duas metades
 
 
 def test_disjointness_check_detects_a_leak(built, tmp_path):
@@ -148,7 +149,7 @@ def test_enrollment_rule_detects_mixture_utterance_in_enrollment(built):
     i = sel.select("C3")[0]
     bad = dataclasses.replace(i, meta={**i.meta, "target_utt": sel.enrollments[i["profile_speaker"]].utterances[0]})
     sel2 = ds.DevHalf.__new__(ds.DevHalf)
-    sel2.name, sel2.root, sel2.enrollments, sel2.items = sel.name, sel.root, sel.enrollments, [bad]
+    sel2.name, sel2.root, sel2.enrollments, sel2.items = sel.name, sel.root, sel.enrollments, [bad, *[x for x in sel.items if x.id != i.id]]
     gate = ds.open_half(out, "dev-gate", final_gate=True, who="test")
     with pytest.raises(ds.DevSetsError, match="enrollment contém a fala"):
         ds.check_disjoint_and_enrollment_rule(sel2, gate)
@@ -247,3 +248,90 @@ def test_meta_only_open_has_no_audio_and_leaves_no_trace(built):
     with pytest.raises(ds.DevGateLocked):
         next(iter(gate.enrollments.values())).audio16k()
     assert (log.read_text() if log.exists() else "") == before
+
+
+# --- fix round 1: corte de silêncio das pontas e mesmo conjunto de falantes nas duas metades -----------------------
+
+
+def _padded(root, name, speech_s, pad_s, f0=150.0, seed=0):
+    """Fala sintética de `speech_s` segundos com `pad_s` de silêncio digital baixo (-70 dBFS) em cada ponta, a 16 kHz."""
+    rng = np.random.default_rng(seed)
+    t = np.arange(int(speech_s * 16_000)) / 16_000
+    sp = 0.2 * sum(np.sin(2 * np.pi * f0 * h * t) / h for h in range(1, 5))
+    pad = lambda: 3e-4 * rng.standard_normal(int(pad_s * 16_000))  # noqa: E731
+    x = np.concatenate([pad(), sp, pad()]).astype(np.float32)
+    (root / "speech").mkdir(exist_ok=True)
+    sf.write(root / "speech" / name, x, 16_000)
+    return x
+
+
+def test_trim_edge_silence_cuts_only_the_edges():
+    rng = np.random.default_rng(1)
+    tone = lambda n: (0.2 * np.sin(2 * np.pi * 200 * np.arange(n) / 16_000)).astype(np.float32)  # noqa: E731
+    quiet = lambda n: (3e-4 * rng.standard_normal(n)).astype(np.float32)  # noqa: E731
+    mid_gap = quiet(8_000)  # pausa de 0,5 s NO MEIO: tem de ficar
+    x = np.concatenate([quiet(24_000), tone(16_000), mid_gap, tone(16_000), quiet(24_000)])
+    y = ds.trim_edge_silence(x)
+    margin = ds.TRIM_MARGIN_FRAMES * 320
+    assert len(y) == 16_000 * 2 + 8_000 + 2 * margin  # fala + pausa interna + margem de 40 ms de cada lado
+    assert np.array_equal(y[margin:margin + 16_000], x[24_000:40_000])
+    assert ds.trim_edge_silence(np.zeros(100, np.float32)).shape == (100,)  # menos de 1 quadro: inalterado
+    z = np.zeros(32_000, np.float32)
+    assert np.array_equal(ds.trim_edge_silence(z), z)  # nenhum quadro acima do piso: inalterado
+
+
+def test_enrollment_trims_edge_silence_without_loosening_the_product_check(tmp_path):
+    from cctrain.data.enroll import EnrollmentRejected, check_enrollment_audio
+
+    root = tmp_path
+    recs = []
+    for k in range(6):  # 4 s de fala com 2 s de silêncio em cada ponta: sem corte, só 50% ativo (< 60% do produto)
+        _padded(root, f"p{k}.wav", 4.0, 2.0, f0=120 + 10 * k, seed=k)
+        recs.append(_rec(f"speech/p{k}.wav", "p", int(8.0 * 16_000), 16_000))
+    cfg = ds.load_devsets_config()
+    got = ds.choose_enrollment(root, recs, np.random.default_rng(0), cfg)
+    assert got is not None
+    audio, used = got
+    check_enrollment_audio(audio)  # validação do produto, a mesma de sempre
+    untrimmed = np.concatenate([np.concatenate([sf.read(root / r.path)[0].astype(np.float32),
+                                                np.zeros(4_000, np.float32)]) for r in recs[:2]])[:128_000]
+    with pytest.raises(EnrollmentRejected, match="insufficient_speech"):
+        check_enrollment_audio(untrimmed)  # sem o corte, a mesma matéria-prima seria recusada
+    # nas pontas do enrollment há fala, não silêncio
+    lvl = lambda a: 10 * np.log10(np.mean(a.astype(np.float64) ** 2) + 1e-12)  # noqa: E731
+    assert lvl(audio[:320 * 3]) > -30 and lvl(audio[-320 * 3:]) > -30
+
+
+def test_both_halves_have_exactly_the_same_speakers_and_exclusions_are_reported(corpus, tmp_path):
+    root, speech, noise, sex = corpus
+    # falante "syn:x" (sexo F): uma fala de 7 s e uma de 3,5 s; a metade que ficar com a curta não tem enrollment válido
+    _padded(root, "x_long.wav", 7.0, 0.0, f0=300, seed=11)
+    _padded(root, "x_short.wav", 3.5, 0.0, f0=310, seed=12)
+    extra = [_rec("speech/x_long.wav", "x", 7 * 16_000, 16_000), _rec("speech/x_short.wav", "x", int(3.5 * 16_000), 16_000)]
+    sex2 = {**sex, "syn:x": "F"}
+    try:
+        summary = ds.build_dev(speech + extra, noise, root, tmp_path / "o", sex2, fake_embed)
+    finally:
+        for f in ("x_long.wav", "x_short.wav"):
+            (root / "speech" / f).unlink()
+    sel = ds.open_half(tmp_path / "o", "dev-select", meta_only=True)
+    gate = ds.open_half(tmp_path / "o", "dev-gate", meta_only=True)
+    assert set(sel.enrollments) == set(gate.enrollments) and "syn:x" not in sel.enrollments
+    assert {i["target_speaker"] for i in sel.items} == {i["target_speaker"] for i in gate.items} == set(sel.enrollments)
+    rep = summary["speakers"]
+    assert rep["excluded"] == 1 and rep["excluded_by_corpus"] == {"syn": 1} and rep["excluded_by_sex"] == {"F": 1}
+    assert rep["excluded_by_corpus_sex"] == {"syn/F": 1} and "syn:x" in rep["excluded_speakers"]
+    assert rep["kept"] == N_SPK and rep["total"] == N_SPK + 1
+    assert json.loads((tmp_path / "o" / "speakers.json").read_text()) == rep
+    ds.check_disjoint_and_enrollment_rule(sel, gate)
+
+
+def test_check_detects_different_speaker_sets(built):
+    out, _, _ = built
+    sel = ds.open_half(out, "dev-select", meta_only=True)
+    gate = ds.open_half(out, "dev-gate", meta_only=True)
+    gate2 = ds.DevHalf.__new__(ds.DevHalf)
+    gate2.name, gate2.root, gate2.items = gate.name, gate.root, gate.items
+    gate2.enrollments = dict(list(gate.enrollments.items())[1:])
+    with pytest.raises(ds.DevSetsError, match="falantes diferentes"):
+        ds.check_disjoint_and_enrollment_rule(sel, gate2)

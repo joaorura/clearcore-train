@@ -8,6 +8,10 @@
 # validação do produto, até 12 tentativas com ordens diferentes de falas, como no M1) é montado só com falas do pool da
 # metade, e as falas que entram nele saem do pool de misturas: o enrollment nunca é a fala da mistura, e nenhuma fala (nem
 # ruído) aparece nas duas metades.
+# Fix round 1 (antes de qualquer render real; nada foi congelado com a versão anterior): (a) cada fala do enrollment tem o
+# silêncio das pontas aparado (VAD de energia de 20 ms, mesma regra do check_enrollment_audio aplicada só às pontas, margem de
+# 40 ms; pausas só ENTRE falas), sem afrouxar a validação do produto; (b) as duas metades têm EXATAMENTE os mesmos falantes: quem
+# não obtém enrollment válido (ou fala de mistura) em alguma metade sai das duas, e o relatório por corpus e sexo vai em speakers.json.
 version: 1
 spec: "docs/superpowers/specs/2026-10-03-clearcore-train-pdfnet3-enrollment-design.md §7; plano M2, Tarefa 4"
 seed: 20261004

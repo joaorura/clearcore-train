@@ -2,7 +2,9 @@
 
 `build_dev` só aceita registros do split `dev` (recusa `train` e `test`). As falas de cada falante são ordenadas por hash e
 repartidas alternadamente entre as metades; dentro de uma metade, o enrollment é montado com falas do pool (as que
-entram nele nunca entram em mistura) e as demais, com duração adequada, formam o pool de misturas. Condições (config `m2-devsets-v1.yaml`): C0 (alvo + ruído, sem perfil),
+entram nele nunca entram em mistura) e as demais, com duração adequada, formam o pool de misturas. O enrollment usa falas com o silêncio das pontas aparado (VAD de energia, `trim_edge_silence`); as duas metades têm EXATAMENTE os
+mesmos falantes (quem não tem enrollment válido ou fala para mistura em alguma das duas sai das duas; o relatório por corpus e
+sexo vai em `speakers.json`). Condições (config `m2-devsets-v1.yaml`): C0 (alvo + ruído, sem perfil),
 C0c (alvo limpo sozinho), C3 (concorrente sem ruído, mesmo sexo), C4 (concorrente + ruído, mesmo sexo), C7 (locutor trocado,
 mesmo/diferente sexo). Sexo só declarado: falante sem sexo declarado fica fora de C3/C4/C7 (e de interferente/perfil).
 
@@ -24,7 +26,13 @@ import numpy as np
 import yaml
 
 from cctrain.data.audio import load_audio, resample
-from cctrain.data.enroll import EnrollmentRejected, check_enrollment_audio
+from cctrain.data.enroll import (
+    VAD_ABSOLUTE_FLOOR_DBFS,
+    VAD_FRAME_SAMPLES,
+    VAD_RELATIVE_RANGE_DB,
+    EnrollmentRejected,
+    check_enrollment_audio,
+)
 from cctrain.data.manifest import FileRecord
 from cctrain.data.mix import MixKind, crop_or_pad, loop_to_length, make_mixture
 from cctrain.data.resample import to_16k
@@ -170,30 +178,60 @@ def _slug(speaker_key: str) -> str:
     return hashlib.sha256(speaker_key.encode()).hexdigest()[:16]
 
 
+TRIM_MARGIN_FRAMES = 2  # 40 ms de margem de cada lado da fala ativa mantida pelo corte de pontas
+
+
+def trim_edge_silence(x16k: np.ndarray) -> np.ndarray:
+    """Apara o silêncio das pontas de uma fala (VAD de energia: quadros de 20 ms; ativo = nível >= max(piso -50 dBFS, pico
+    do quadro - 30 dB), a mesma regra do `check_enrollment_audio`, mas só nas pontas; o meio da fala não é tocado),
+    com 40 ms de margem. Fala sem nenhum quadro ativo volta inalterada (a validação do produto decide)."""
+    x = np.asarray(x16k, np.float32)
+    n_frames = len(x) // VAD_FRAME_SAMPLES
+    if n_frames == 0:
+        return x
+    fr = x[: n_frames * VAD_FRAME_SAMPLES].astype(np.float64).reshape(n_frames, VAD_FRAME_SAMPLES)
+    level = 10.0 * np.log10((fr * fr).mean(axis=1) + 1e-12)
+    active = np.flatnonzero(level >= max(float(VAD_ABSOLUTE_FLOOR_DBFS), float(level.max()) - float(VAD_RELATIVE_RANGE_DB)))
+    if active.size == 0:
+        return x
+    a = max(int(active[0]) - TRIM_MARGIN_FRAMES, 0) * VAD_FRAME_SAMPLES
+    b = len(x) if int(active[-1]) + 1 + TRIM_MARGIN_FRAMES >= n_frames else (int(active[-1]) + 1 + TRIM_MARGIN_FRAMES) * VAD_FRAME_SAMPLES
+    return x[a:b]
+
+
 def choose_enrollment(root: Path, pool: Sequence[FileRecord], rng: np.random.Generator, cfg: DevSetsConfig,
                       tries: int = 12) -> tuple[np.ndarray, tuple[FileRecord, ...]] | None:
-    """Enrollment de `enroll_min_s`..`enroll_max_s` (16 kHz) só de falas do `pool` da metade, com pausas, válido pelo
-    `check_enrollment_audio` do produto (como no M1: várias tentativas com ordens diferentes de falas). Devolve o áudio e as
-    falas que de fato entram nele (só elas saem do pool de misturas); None se nenhuma tentativa valida."""
+    """Enrollment de `enroll_min_s`..`enroll_max_s` (16 kHz) só de falas do `pool` da metade, com o silêncio das pontas de cada
+    fala aparado (`trim_edge_silence`, antes de concatenar) e pausas curtas SÓ entre falas, válido pelo `check_enrollment_audio`
+    do produto (sem afrouxá-lo; como no M1: várias tentativas com ordens diferentes de falas). Devolve o áudio e as falas que
+    de fato entram nele (só elas saem do pool de misturas); None se nenhuma tentativa valida."""
     cache: dict[str, np.ndarray] = {}
     for _ in range(tries):
         want = float(rng.uniform(cfg.enroll_min_s, cfg.enroll_max_s))
         n_want = int(want * ENROLL_SR)
-        parts, used, total = [], [], 0
+        parts, used, bounds, total = [], [], [], 0
         for k in rng.permutation(len(pool)):
             r = pool[int(k)]
             if r.path not in cache:
                 x, sr = load_audio(Path(root) / r.path)
-                cache[r.path] = to_16k(x, sr)
+                cache[r.path] = trim_edge_silence(to_16k(x, sr))
+            if parts:
+                pause = np.zeros(int(rng.uniform(*cfg.pause_s) * ENROLL_SR), np.float32)
+                parts.append(pause)
+                total += len(pause)
             used.append(r)
-            parts += [cache[r.path], np.zeros(int(rng.uniform(*cfg.pause_s) * ENROLL_SR), np.float32)]
-            total = sum(len(p) for p in parts)
+            bounds.append((total, total + len(cache[r.path])))
+            parts.append(cache[r.path])
+            total += len(cache[r.path])
             if total >= n_want:
                 break
-        audio = np.concatenate(parts)[:n_want].astype(np.float32)
-        # só as falas que começam antes do corte entram no enrollment (as demais não foram usadas)
-        starts = np.cumsum([0] + [len(p) for p in parts])[::2][: len(used)]
-        used = [r for r, st in zip(used, starts, strict=True) if st < n_want]
+        # só as falas que começam antes do corte entram; o corte cai na fala (nunca numa pausa): termina no fim da última fala
+        # se ela acaba antes de `n_want`. Se o enrollment ficar menor que o mínimo, a validação do produto o recusa e há retry.
+        keep = [(r, b) for r, b in zip(used, bounds, strict=True) if b[0] < n_want]
+        if not keep:
+            return None  # pool vazio
+        used = [r for r, _ in keep]
+        audio = np.concatenate(parts)[: min(n_want, keep[-1][1][1])].astype(np.float32)
         try:
             check_enrollment_audio(audio)
         except EnrollmentRejected:
@@ -221,29 +259,66 @@ def build_dev(records: Sequence[FileRecord], noise: Sequence[FileRecord], data_r
     data_root, out_dir = Path(data_root), Path(out_dir)
     parts = partition_utterances(records, cfg)
     noise_by_half = split_noise_halves(noise, cfg)
-    summary: dict = {}
+    # Enrollments das DUAS metades antes de qualquer item: o conjunto de falantes tem de ser o mesmo nas duas (senão o
+    # dev-select escolheria checkpoint num conjunto de falantes diferente do que o dev-gate confirma: viés de seleção).
+    chosen: dict[str, dict[str, tuple[np.ndarray, tuple[FileRecord, ...]]]] = {h: {} for h in cfg.halves}
+    mix_pools: dict[str, dict[str, tuple[FileRecord, ...]]] = {h: {} for h in cfg.halves}
+    why: dict[str, list[str]] = {}
+    for spk in sorted(parts):
+        for half in cfg.halves:
+            hu = parts[spk][half]
+            got = choose_enrollment(data_root, hu.pool, _rng(cfg.seed, half, "enroll", spk), cfg)
+            if got is None:
+                why.setdefault(spk, []).append(f"{half}: sem enrollment válido")
+                continue
+            mp = hu.mix_pool(got[1], cfg)
+            if not mp:
+                why.setdefault(spk, []).append(f"{half}: sem fala de 3-10 s para misturas depois do enrollment")
+                continue
+            chosen[half][spk], mix_pools[half][spk] = got, mp
+    keep = {s for s in parts if all(s in chosen[h] for h in cfg.halves)}
+    speakers_report = _speakers_report(parts, keep, why, sex)
+    for spk in sorted(why):
+        log(f"[dev] {spk.split(':', 1)[0]}:{_slug(spk)[:6]}: fora das duas metades ({'; '.join(why[spk])})")
+    log(f"[dev] falantes: {len(keep)}/{len(parts)} nas duas metades; fora por corpus {speakers_report['excluded_by_corpus']}, "
+        f"por sexo {speakers_report['excluded_by_sex']}")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "speakers.json").write_text(json.dumps(speakers_report, indent=2, sort_keys=True) + "\n")
+    summary: dict = {"speakers": speakers_report}
     for half in cfg.halves:
-        summary[half] = _build_half(half, parts, noise_by_half[half], data_root, out_dir / half, sex, embed, cfg, log)
+        summary[half] = _build_half(half, {s: chosen[half][s] for s in sorted(keep)},
+                                    {s: mix_pools[half][s] for s in keep}, noise_by_half[half], data_root, out_dir / half,
+                                    sex, embed, cfg, log)
     return summary
 
 
-def _build_half(half: str, parts: Mapping[str, Mapping[str, HalfUtterances]], noise: Sequence[FileRecord],
+def _speakers_report(parts: Mapping, keep: set[str], why: Mapping[str, list[str]], sex: Mapping[str, str]) -> dict:
+    """Quem ficou e quem saiu (das duas metades), por corpus e sexo declarado, com o motivo de cada exclusão."""
+    corp = lambda k: k.split(":", 1)[0]  # noqa: E731
+    sx = lambda k: sex.get(k) or "undeclared"  # noqa: E731
+    out_: dict = {"total": len(parts), "kept": len(keep), "excluded": len(parts) - len(keep)}
+    for name, groups in (("kept", keep), ("excluded", set(parts) - keep)):
+        for dim, fn in (("corpus", corp), ("sex", sx), ("corpus_sex", lambda k: f"{corp(k)}/{sx(k)}")):
+            cnt: dict[str, int] = defaultdict(int)
+            for k in groups:
+                cnt[fn(k)] += 1
+            out_[f"{name}_by_{dim}"] = dict(sorted(cnt.items()))
+    out_["total_by_corpus"] = dict(sorted({c: sum(1 for k in parts if corp(k) == c) for c in {corp(k) for k in parts}}.items()))
+    out_["excluded_speakers"] = {k: why[k] for k in sorted(set(parts) - keep)}
+    return out_
+
+
+def _build_half(half: str, enrolls: Mapping[str, tuple[np.ndarray, tuple[FileRecord, ...]]],
+                mix_pool: Mapping[str, tuple[FileRecord, ...]], noise: Sequence[FileRecord],
                 data_root: Path, out: Path, sex: Mapping[str, str], embed, cfg: DevSetsConfig, log) -> dict:
     out.mkdir(parents=True, exist_ok=True)
     seed = cfg.seed
     corpus = lambda k: k.split(":", 1)[0]  # noqa: E731
-    # enrollments (escolhidos no pool da metade; as falas usadas saem do pool de misturas)
+    # enrollments já escolhidos (no pool da metade; as falas usadas saem do pool de misturas)
     enroll_rows, embs = [], []
     enrolled: dict[str, int] = {}
-    mix_pool: dict[str, tuple[FileRecord, ...]] = {}
-    for spk in sorted(parts):
-        hu = parts[spk][half]
-        chosen = choose_enrollment(data_root, hu.pool, _rng(seed, half, "enroll", spk), cfg)
-        if chosen is None:
-            log(f"[{half}] {corpus(spk)}:{_slug(spk)[:6]}: sem enrollment válido; fica fora")
-            continue
-        audio, used_utts = chosen
-        mix_pool[spk] = hu.mix_pool(used_utts, cfg)
+    for spk in sorted(enrolls):
+        audio, used_utts = enrolls[spk]
         meta = _save_npy(out / "enroll" / f"{_slug(spk)}.npy", _to_i16(audio))
         emb = np.asarray(embed(_from_i16(_to_i16(audio))), np.float32).reshape(EMB_DIM)
         enrolled[spk] = len(embs)
@@ -254,7 +329,7 @@ def _build_half(half: str, parts: Mapping[str, Mapping[str, HalfUtterances]], no
     np.save(out / "enroll_emb.npy", np.stack(embs).astype(np.float32), allow_pickle=False)
     _write_jsonl(out / "enroll.jsonl", enroll_rows)
 
-    speakers = [s for s in sorted(parts) if s in enrolled and mix_pool[s]]
+    speakers = sorted(enrolled)
     cursor: dict[str, int] = defaultdict(int)
     perms = {s: _rng(seed, half, "perm", s).permutation(len(mix_pool[s])) for s in speakers}
 
@@ -467,8 +542,13 @@ def utterances_of(half: DevHalf) -> set[str]:
 
 
 def check_disjoint_and_enrollment_rule(select: DevHalf, gate: DevHalf) -> dict:
-    """Levanta `DevSetsError` se uma fala (ou ruído) aparece nas duas metades, ou se alguma mistura contém uma fala do
+    """Levanta `DevSetsError` se as metades não têm exatamente os mesmos falantes, se uma fala (ou ruído) aparece nas duas metades, ou se alguma mistura contém uma fala do
     enrollment do seu perfil. Devolve contagens."""
+    if set(select.enrollments) != set(gate.enrollments):
+        diff = sorted(set(select.enrollments) ^ set(gate.enrollments))
+        raise DevSetsError(f"as metades têm falantes diferentes ({len(diff)} só numa delas, p.ex. {diff[:3]})")
+    if {i["target_speaker"] for i in select.items} != {i["target_speaker"] for i in gate.items}:
+        raise DevSetsError("os falantes-alvo dos itens diferem entre as metades")
     both = utterances_of(select) & utterances_of(gate)
     if both:
         raise DevSetsError(f"{len(both)} falas nas duas metades, p.ex. {sorted(both)[:3]}")
@@ -483,7 +563,8 @@ def check_disjoint_and_enrollment_rule(select: DevHalf, gate: DevHalf) -> dict:
             clash = set(half.enrollments[prof].utterances) & {i["target_utt"], i["interferer_utt"]}
             if clash:
                 raise DevSetsError(f"{i.id}: enrollment contém a fala da mistura {sorted(clash)}")
-    return {"utterances_select": len(utterances_of(select)), "utterances_gate": len(utterances_of(gate))}
+    return {"utterances_select": len(utterances_of(select)), "utterances_gate": len(utterances_of(gate)),
+            "speakers": len(select.enrollments)}
 
 
 def half_digest(root: Path) -> dict:

@@ -1,22 +1,23 @@
-"""Calibração do `tsos_config` no dev (`calibrated_in_dev` do gates-v2; os níveis do G3 não mudam).
+"""Convenção FIXA do TSOS e relatório de plausibilidade no dev (`calibrated_in_dev: tsos_config` do gates-v2).
 
-Fato (M2 T3): a eq. 3 do TSOS (Eskimez et al. 2021, arXiv 2110.09625) não é invariante à escala, e o paper não fixa a
-escala nem a STFT. Só `amplitude_scale` fica livre aqui (p = 0,3, γ = 0,1, STFT 20/10 ms são os do paper/DeepFilterNet).
+Fato (M2 T3): a eq. 3 do TSOS (Eskimez et al. 2021, arXiv 2110.09625) não é invariante à escala, e o paper não fixa a escala
+nem a STFT. Convenção (fix round 1, decisão da revisão): áudio float em [-1, 1], `amplitude_scale` = 1, p = 0,3, γ = 0,1 do
+paper, STFT de 20/10 ms (a do DeepFilterNet), registrada no `tsos-config-v1.yaml`. NÃO há grade nem ajuste de escala: ajustar a
+escala para o DFNet3 bater um número do paper seria circular (o TSOS cresce com a escala) e o "alvo" não existe, porque os
+baselines do paper são de outro modelo (DCCRN) em outra escala de áudio desconhecida.
 
-Regra (escolha do implementador, a confirmar pelo orquestrador): ancorar a escala no modelo NÃO personalizado do próprio
-paper. Os níveis 1/2/3% do G3 vieram de comparar modelos personalizados com o baseline sem personalização do paper (DCCRN
-sem personalização, TS3 = alvo limpo sozinho: 9,01% no ICR e 5,13% no VCTK, tabela 1). Escolhe-se, numa grade logarítmica
-2^(k/2), a escala em que o DFNet3 upstream (também um modelo não personalizado), em C0c do `dev-select`, mais se aproxima
-(em escala log) da média desses dois valores. Só entram o `dev-select` e o DFNet3 upstream: nem o candidato F nem o
-`dev-gate` participam. O critério relativo do G3 (≤ DFNet3 + 0,5 p.p.) não depende desta âncora.
+O `calibrate` só MEDE o DFNet3 upstream por condição no `dev-select` e compara com a faixa do baseline NÃO personalizado do
+paper (DCCRN sem personalização, tabela 1, como citado em R06) NA CONDIÇÃO CERTA: o alvo limpo sozinho é TS3 (1,47% ICR a
+2,42% VCTK), não TS1 (a média 7,07% que a versão anterior usava é de TS1). Se o DFNet3 em TS3 cai muito fora da faixa
+(fator `PLAUSIBILITY_FACTOR`), a convenção NÃO é congelada: o resultado fica no relatório e a decisão é do dono (gates-v3: só
+critério relativo, ou escala externa por dBFS). O critério relativo do G3 (≤ DFNet3 + 0,5 p.p.) não depende da escala.
 """
 
 from __future__ import annotations
 
-import dataclasses
 import math
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import numpy as np
@@ -27,13 +28,24 @@ from cctrain.eval.metrics import TsosConfig, tsos
 from cctrain.paths import repo_root
 
 TSOS_V1 = repo_root() / "configs" / "eval" / "tsos-config-v1.yaml"
-PAPER_BASELINE_TS3_PCT = {"ICR": 9.01, "VCTK": 5.13}  # DCCRN sem personalização, TS3, tabela 1 do paper
-ANCHOR_PCT = float(np.mean(list(PAPER_BASELINE_TS3_PCT.values())))
-GRID_K = range(-24, 33)  # escalas 2^(k/2): de 2^-12 a 2^16 (32768 = int16 está na grade como k = 30)
+CONVENTION = TsosConfig(p=0.3, gamma=0.1, win_ms=20.0, hop_ms=10.0, amplitude_scale=1.0)
+
+# DCCRN SEM personalização, tabela 1 de Eskimez et al. 2021 (R06 l.212): (ICR, VCTK) em %, por cenário.
+# TS1 = alvo + interferente + ruído, TS2 = alvo + ruído, TS3 = alvo limpo sozinho.
+PAPER_BASELINE_PCT = {"TS1": (9.01, 5.13), "TS2": (7.32, 5.33), "TS3": (1.47, 2.42)}
+# condição do dev -> cenário do paper (C3 não tem contraparte no paper: só é medida)
+PAPER_SCENARIO = {"C0c": "TS3", "C0": "TS2", "C4": "TS1"}
+PLAUSIBILITY_FACTOR = 2.0  # "muito fora" = abaixo de lo/2 ou acima de 2*hi da faixa do paper
+GATING_CONDITION = "C0c"  # só a condição TS3 (alvo limpo) decide o congelamento; as demais são informativas
+OWNER_DECISION = "requer decisão do dono (gates-v3: só critério relativo ou escala externa por dBFS)"
 
 
-def scale_grid() -> list[float]:
-    return [float(2.0 ** (k / 2.0)) for k in GRID_K]
+def paper_band(condition: str) -> tuple[float, float] | None:
+    sc = PAPER_SCENARIO.get(condition)
+    if sc is None:
+        return None
+    lo, hi = sorted(PAPER_BASELINE_PCT[sc])
+    return lo, hi
 
 
 def mean_per_speaker(values: Sequence[float], speakers: Sequence[str]) -> float:
@@ -44,22 +56,38 @@ def mean_per_speaker(values: Sequence[float], speakers: Sequence[str]) -> float:
     return float(np.mean([np.mean(g) for g in groups.values()])) if groups else float("nan")
 
 
-def calibrate_amplitude_scale(pairs: Sequence[tuple[np.ndarray, np.ndarray]], speakers: Sequence[str], sr: int, *,
-                              anchor_pct: float = ANCHOR_PCT, grid: Sequence[float] | None = None,
-                              base: TsosConfig | None = None) -> dict:
-    """`pairs` = (saída do DFNet3 alinhada, alvo limpo). Devolve a tabela escala -> TSOS (%, média por falante) e a escolha."""
-    base = base or TsosConfig()
-    table = []
-    for a in grid or scale_grid():
-        cfg = dataclasses.replace(base, amplitude_scale=a)
-        per_clip = [float(tsos(e, r, sr, cfg)[0]) for e, r in pairs]
-        table.append({"amplitude_scale": a, "tsos_pct": mean_per_speaker(per_clip, speakers)})
-    usable = [r for r in table if r["tsos_pct"] > 0 and math.isfinite(r["tsos_pct"])]
-    if not usable:
-        raise ValueError("nenhuma escala da grade dá TSOS > 0 no DFNet3")
-    best = min(usable, key=lambda r: abs(math.log(r["tsos_pct"] / anchor_pct)))
-    return {"anchor_pct": anchor_pct, "chosen_amplitude_scale": best["amplitude_scale"],
-            "chosen_tsos_pct": best["tsos_pct"], "table": table}
+def measure_tsos(pairs: Sequence[tuple[np.ndarray, np.ndarray]], speakers: Sequence[str], sr: int,
+                 cfg: TsosConfig = CONVENTION) -> float:
+    """TSOS (%, média por falante) de `pairs` = (saída alinhada, alvo limpo) na convenção `cfg`."""
+    return mean_per_speaker([float(tsos(e, r, sr, cfg)[0]) for e, r in pairs], speakers)
+
+
+def plausibility(measured: Mapping[str, float], factor: float = PLAUSIBILITY_FACTOR) -> dict:
+    """Compara o TSOS medido do DFNet3, por condição, com a faixa do baseline do paper na condição certa.
+
+    Por condição com contraparte no paper: faixa [lo, hi], `status` = `in_band` | `near_band` (dentro do fator) | `far_outside`.
+    `freeze` só depende da condição `GATING_CONDITION`: congelar a convenção se ela não é `far_outside`."""
+    rows: dict[str, dict] = {}
+    for cond, v in measured.items():
+        band = paper_band(cond)
+        row: dict = {"tsos_pct": float(v), "paper_scenario": PAPER_SCENARIO.get(cond), "band_pct": band}
+        if band is None:
+            row["status"] = "no_paper_counterpart"
+        elif not math.isfinite(v) or v <= 0:
+            row["status"] = "far_outside"
+        elif band[0] <= v <= band[1]:
+            row["status"] = "in_band"
+        elif band[0] / factor <= v <= band[1] * factor:
+            row["status"] = "near_band"
+        else:
+            row["status"] = "far_outside"
+        rows[cond] = row
+    gate = rows.get(GATING_CONDITION)
+    if gate is None:
+        raise ValueError(f"falta a condição {GATING_CONDITION} para decidir o congelamento")
+    freeze = gate["status"] in ("in_band", "near_band")
+    return {"factor": factor, "gating_condition": GATING_CONDITION, "conditions": rows, "freeze": freeze,
+            "decision": "convenção congelada" if freeze else OWNER_DECISION}
 
 
 def load_tsos_config(path: Path = TSOS_V1) -> TsosConfig:
