@@ -24,6 +24,7 @@ dependencies = [
   "packaging>=23",
   "appdirs>=1.4",
   "sympy>=1.6",
+  "pystoi>=0.4",
 ]
 
 [dependency-groups]

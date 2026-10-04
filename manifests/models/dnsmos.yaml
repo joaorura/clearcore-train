@@ -1,0 +1,53 @@
+# Avaliador local de qualidade (M2 Tarefa 3): DNSMOS P.835 e personalizado, onnxruntime. Nunca entra no pacote de entrega nem no treino (spec §7.1).
+id: dnsmos
+name: DNSMOS P.835 e P.835 personalizado (DNS-Challenge, Microsoft)
+local_dir: dnsmos
+role: tool_only
+repo: microsoft/DNS-Challenge
+landing_page: https://github.com/microsoft/DNS-Challenge/tree/master/DNSMOS
+revision: 591184a9fcb2cbdec02520fed81a32bbbf9d73ff
+base_url: https://raw.githubusercontent.com/microsoft/DNS-Challenge/591184a9fcb2cbdec02520fed81a32bbbf9d73ff/DNSMOS
+license: CC-BY-4.0 (modelos .onnx e documentação) + MIT (código)
+license_evidence: 'README.md do repositório na revisão fixada, seção de licenças: "documentation and other content in this
+  repository under the Creative Commons Attribution 4.0 International Public License, see the LICENSE file, and ... any code
+  in the repository under the MIT License, see the LICENSE-CODE file"; LICENSE (CC BY 4.0) e LICENSE-CODE (MIT) abaixo com
+  SHA-256; API do GitHub: license = cc-by-4.0. DIVERGÊNCIA COM A SPEC §7.1 ("repo MIT"): só o código é MIT; os .onnx são conteúdo
+  do repositório, logo CC BY 4.0 (permissiva com atribuição). Uso aqui é só avaliação local; nada é redistribuído ou embarcado,
+  e relatórios citam Reddy et al.'
+citation: Reddy, Gopal, Cutler. DNSMOS P.835 (ICASSP 2022, arXiv:2110.01763); DNSMOS (ICASSP 2021, arXiv:2010.15258)
+architecture:
+  input: 'input_1 [1, 144160] float32: 9,01 s a 16 kHz, sem normalização'
+  output: '[1, 3] (SIG, BAK, OVRL) brutos; polinômio de ajuste do dnsmos_local.py'
+  windowing: janelas de 9,01 s com passo de 1 s; áudio mais curto é repetido até 9,01 s; média das janelas
+  polyfit: constantes copiadas de dnsmos_local.py (ver cctrain.eval.dnsmos.POLY)
+files:
+  DNSMOS/sig_bak_ovr.onnx:
+    sha256: 269fbebdb513aa23cddfbb593542ecc540284a91849ac50516870e1ac78f6edd
+    size: 1157965
+    used: true
+    note: DNSMOS P.835 (SIG/BAK/OVRL), blob git 814b8dc6; usado pelo avaliador
+  pDNSMOS/sig_bak_ovr.onnx:
+    sha256: 9e3a197449ca2177f0997afec3bd6b890117ce2f17b89d6eea7fa0d47272c81c
+    size: 1157962
+    used: true
+    note: 'DNSMOS P.835 personalizado (`-p`: penaliza falante interferente), blob git 6582f573; usado'
+  dnsmos_local.py:
+    sha256: 1ab566afe006daab32ac7073296a5d0ef99f8b82f91c7266f3ccf26113d7a28b
+    size: 6491
+    used: false
+    note: script de referência (constantes dos polinômios e janelamento conferidos contra ele); não é executado
+  README.md:
+    sha256: 2d919ce628b72e2ba94b586654f3afa31930f7467ebe45bb4ddbb14a21226331
+    size: 2239
+    used: false
+    note: descreve o flag -p e a citação
+  LICENSE:
+    sha256: d6239afa918961b465b07bf7411cbe34ff6685854f58553db7966f4881a0211f
+    size: 19047
+    used: false
+    note: CC BY 4.0 (conteúdo, inclui os .onnx)
+  LICENSE-CODE:
+    sha256: 9906940f61b1f0b533fa7d99baf55178b2808fbe113ea51dfbfad8572ccd5f2b
+    size: 1162
+    used: false
+    note: MIT (código)
