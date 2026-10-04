@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import sys
 import time
@@ -65,18 +66,36 @@ def cmd_sex(a) -> None:
             raise SystemExit(f"divergência com splits.speaker_sex em {k}")
     log(f"sex-v1.jsonl: {len(public)} falantes públicos, sha256 {digest[:12]}")
 
-    cv_stats: dict = {"status": "sem validated.tsv informado (--cv-validated): CV fora do mapa"}
+    cv_stats: dict = {"status": "sem --cv-archive: CV fora do mapa"}
     cv_sex: dict[str, str] = {}
     cv_sha = None
-    if a.cv_validated:
-        tsv = Path(a.cv_validated)
-        with tsv.open(newline="") as fh:
-            cv_sex, cv_stats = cv_declared_sex(csv.DictReader(fh, delimiter="\t", quoting=csv.QUOTE_NONE))
+    if a.cv_archive:
+        import tarfile
+
+        from cctrain.data.pilot import CV_ARCHIVE_SHA256, CV_VALIDATED_SUFFIX
+
+        archive = Path(a.cv_archive)
+        got = sha256_file(archive)
+        if got != CV_ARCHIVE_SHA256:
+            raise SystemExit(f"{archive.name}: SHA-256 {got} != {CV_ARCHIVE_SHA256} (lock do CV)")
+        log(f"tar do CV conferido ({got[:12]}); lendo validated.tsv em stream")
+        with tarfile.open(archive, mode="r|gz") as tar:
+            for member in tar:
+                if member.isfile() and member.name.endswith(CV_VALIDATED_SUFFIX):
+                    fh = tar.extractfile(member)
+                    text = fh.read().decode("utf-8").splitlines()  # type: ignore[union-attr]
+                    tsv_member = member.name
+                    break
+            else:
+                raise SystemExit("validated.tsv ausente no tar")
+        cv_sex, cv_stats = cv_declared_sex(csv.DictReader(text, delimiter="\t", quoting=csv.QUOTE_NONE))
+        cv_stats["archive_sha256"] = got
+        cv_stats["archive_member"] = tsv_member
+        cv_stats["validated_tsv_sha256"] = hashlib.sha256("\n".join(text).encode()).hexdigest()
         cv_path = PATHS.data / SEX_CV_REL
         cv_sha = write_sex_rows(cv_sex, cv_path, source="declared:cv27-pt validated.tsv gender")
         lock = REPO / "manifests" / "speakers" / "sex-cv27-pt-v1.sha256"  # só o hash: o arquivo tem client_id
         lock.write_text(f"{cv_sha}  data/{SEX_CV_REL.as_posix()}\n")
-        cv_stats["validated_tsv_sha256"] = sha256_file(tsv)
         log(f"sex-cv27-pt-v1.jsonl (fora do git): {len(cv_sex)} client_id, sha256 {cv_sha[:12]}")
     elif (PATHS.data / SEX_CV_REL).is_file():
         cv_sha = sha256_file(PATHS.data / SEX_CV_REL)
@@ -131,7 +150,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("sex")
-    p.add_argument("--cv-validated", default=None, help="validated.tsv do Common Voice 27 (colunas client_id, gender)")
+    p.add_argument("--cv-archive", default=None, help="tar.gz original do Common Voice 27 (SHA-256 conferido contra o lock)")
     sub.add_parser("ab1")
     a = ap.parse_args()
     {"sex": cmd_sex, "ab1": cmd_ab1}[a.cmd](a)
