@@ -1,0 +1,51 @@
+# Regra de seleção de checkpoint do M2 e decisões do dono, versão 1. Pré-registrada e congelada pelo SHA-256 em
+# m2-selection-v1.sha256 antes da Tarefa 6 (plano 2026-10-03-m2-plan.md, "Seleção de checkpoint"). Nenhum nível do
+# gates-v2.yaml muda aqui; este arquivo só fixa a regra de seleção e a interpretação do G1 no dev. Mudança = nova versão.
+version: 1
+gates_file: configs/eval/gates-v2.yaml
+evaluation:
+  split: dev-select
+  path: offline_gating_emulated       # caminho do runtime só na Tarefa 8
+  every: epoch
+eligibility:
+  # sem perfil (C0), contra o DFNet3 upstream, estimativa pontual
+  condition: C0
+  reading: point_estimate
+  delta_si_sdr_db_min: -0.5
+  delta_stoi_min: -0.003
+score:
+  # média por falante do ΔSI-SDR (F − DFNet3) em C3, SIR 0 dB, todos os falantes do dev-select
+  metric: delta_si_sdr_db
+  condition: C3
+  sir_db: 0.0
+  aggregation: mean_per_speaker
+  speakers: all_dev_select
+choose: highest_score_among_eligible
+tie:
+  tolerance_db: 0.05                   # empate (< 0,05 dB) -> o mais antigo
+  prefer: oldest
+early_stopping:
+  from_epoch: 8
+  patience_evaluations: 4
+  min_improvement_db: 0.1              # melhor escore elegível tem de subir >= 0,1 dB
+no_eligible_action: no_go_t3           # nenhum elegível ao fim: NO-GO do T3, sem candidato
+forbidden_inputs: [dev-gate, test]     # nenhuma escolha (seleção, AB1, AB2) lê dev-gate ou teste
+# --- decisões do dono de 2026-10-03 -------------------------------------------------------------------------------
+# G1 no dev (o gates-v2 não diz como ler a tolerância): a margem vale para o limite do IC 95% (bootstrap pareado por
+# falante, 10.000 reamostragens, gates-v2.statistics) que está do lado da reprovação: margens de mínimo (ΔSTOI,
+# ΔSI-SDR, ΔDNSMOS) pelo LIMITE INFERIOR; margem de máximo (ΔLSD > 8 kHz) pelo LIMITE SUPERIOR. Mais estrito que a
+# estimativa pontual. Vale para o G1 da Tarefa 8 e para a decisão da AB2 ("passa G1"); a elegibilidade por época
+# acima continua pontual, como pré-registrada.
+g1_dev_reading: ci95_bound_toward_failure
+on_stage_f_fail:
+  # F reprova G1, G2 ou G4 no dev -> PARAR e diagnosticar: não exporta, não há gates-v3, nenhum nível muda
+  gates: [G1, G2, G4]
+  action: stop_and_diagnose
+  export: false
+  gates_v3: false
+ab1:
+  design: full_run_one_seed_per_arm    # braços p_enroll_denoise 0 e 0,5; sem ramos herdados (≈ 13 h)
+  label: indicativo
+# sexo por falante: só de metadado declarado (SPEAKERS.TXT, speaker-info, coluna gender do CV, documentação do
+# TTS-Portuguese); nenhuma inferência por modelo. Falante sem sexo declarado fica fora do mesmo/diferente sexo.
+speaker_sex_source: declared_metadata_only
