@@ -99,3 +99,29 @@ def test_mix_rng_varies_with_epoch_and_index_but_is_reproducible():
     assert not np.array_equal(a, mix_rng(7, 1, 3).random(4))
     assert not np.array_equal(a, mix_rng(7, 0, 4).random(4))
     assert not np.array_equal(a, mix_rng(8, 0, 3).random(4))
+
+
+def test_clean_all_is_the_sum_of_the_dry_speakers_at_the_mixture_level():
+    rng = np.random.default_rng(3)
+    t = rng.standard_normal(48_000).astype(np.float32) * 0.1
+    i1 = rng.standard_normal(48_000).astype(np.float32) * 0.2
+    i2 = rng.standard_normal(48_000).astype(np.float32) * 0.05
+    plain = make_mixture(t, [], None, kind=MixKind.TARGET_NOISE, snr_db=0, sir_db=float("nan"))
+    assert np.array_equal(plain.clean_all, plain.clean)
+    m = make_mixture(t, [i1, i2], None, kind=MixKind.TARGET_INTERFERER, snr_db=0, sir_db=5.0)
+    rest = m.clean_all.astype(np.float64) - m.clean.astype(np.float64)
+    assert 10 * np.log10(np.mean(m.clean.astype(np.float64) ** 2) / np.mean(rest**2)) == pytest.approx(5.0, abs=1e-3)
+    assert np.allclose(m.clean_all, m.noisy, atol=1e-6)  # sem ruído e sem RIR a mistura é a soma das falas secas
+    only = make_mixture(t, [i1], None, kind=MixKind.INTERFERER_ONLY, snr_db=0, sir_db=float("nan"))
+    assert not only.clean.any() and np.allclose(only.clean_all, only.noisy, atol=1e-6)
+
+
+def test_clean_all_follows_the_direct_path_delay_of_each_rir():
+    rng = np.random.default_rng(4)
+    t = rng.standard_normal(4_800).astype(np.float32)
+    i1 = rng.standard_normal(4_800).astype(np.float32)
+    h = np.zeros(300)
+    h[50] = 1.0
+    m = make_mixture(t, [i1], None, kind=MixKind.TARGET_INTERFERER, snr_db=0, sir_db=0.0, rir_target=h,
+                     rir_interferer=h)
+    assert np.allclose(m.clean_all, m.noisy, atol=1e-5)  # RIR de impulso atrasado: alvo seco alinhado = mistura
