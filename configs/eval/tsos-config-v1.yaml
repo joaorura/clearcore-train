@@ -1,0 +1,14 @@
+# tsos_config v1: convenção FIXA (nada foi calibrado): áudio float [-1, 1], amplitude_scale 1, p e gamma do paper, STFT 20/10 ms
+# (a do DeepFilterNet). Congelado pelo SHA-256 em tsos-config-v1.sha256 ANTES de qualquer leitura do G3. O DFNet3 upstream foi
+# MEDIDO no dev-select (plausibilidade contra a faixa do baseline do paper na condição certa): docs/plans/m2-reports/t4.md.
+# Decisão do dono: Opção A: convenção fixa mantida, G3 por critério relativo <= DFNet3 + 0.5 pp.
+# Os níveis do G3 não mudam.
+version: 1
+decision: "Opção A: convenção fixa mantida, G3 por critério relativo <= DFNet3 + 0.5 pp"
+plausibility: {split: dev-select, gating_condition: C0c, dfnet3_tsos_pct: {"C0c": 10.419, "C0": 28.17, "C3": 10.815, "C4": 17.605}, dev_select_items_sha256: 5997193d22d5f6ebfd211d6df45e66ae4b7106b5e32b180c541dd5f10c27fca8}
+config:
+  p: 0.3
+  gamma: 0.1
+  win_ms: 20.0
+  hop_ms: 10.0
+  amplitude_scale: 1.0

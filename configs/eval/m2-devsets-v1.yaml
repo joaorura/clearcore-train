@@ -1,0 +1,58 @@
+# Dev do M2 pré-renderizado e congelado, versão 1 (plano 2026-10-03-m2-plan.md, Tarefa 4). O SHA-256 deste arquivo fica em
+# m2-devsets-v1.sha256; o SHA-256 das listas de itens e dos áudios renderizados, em m2-devsets-v1.freeze.json (gerado por
+# `scripts/m2_t4.py freeze`, antes da Tarefa 6). Mudar qualquer valor exige m2-devsets-v2 com justificativa escrita.
+#
+# Duas metades DISJUNTAS POR FALA (mesmos falantes; o dev é pequeno): `dev-select` (seleção de checkpoint e escolhas das
+# ablações) e `dev-gate` (lida uma única vez, na Tarefa 8; nenhuma escolha a usa). Por falante, as falas do split `dev` são
+# ordenadas por hash e repartidas alternadamente entre as metades; dentro de cada metade, o enrollment (6-10 s, válido pela
+# validação do produto, até 12 tentativas com ordens diferentes de falas, como no M1) é montado só com falas do pool da
+# metade, e as falas que entram nele saem do pool de misturas: o enrollment nunca é a fala da mistura, e nenhuma fala (nem
+# ruído) aparece nas duas metades.
+# Fix round 1 (antes de qualquer render real; nada foi congelado com a versão anterior): (a) cada fala do enrollment tem o
+# silêncio das pontas aparado (VAD de energia de 20 ms, mesma regra do check_enrollment_audio aplicada só às pontas, margem de
+# 40 ms; pausas só ENTRE falas), sem afrouxar a validação do produto; (b) as duas metades têm EXATAMENTE os mesmos falantes: quem
+# não obtém enrollment válido (ou fala de mistura) em alguma metade sai das duas, e o relatório por corpus e sexo vai em speakers.json.
+version: 1
+spec: "docs/superpowers/specs/2026-10-03-clearcore-train-pdfnet3-enrollment-design.md §7; plano M2, Tarefa 4"
+seed: 20261004
+source_split: dev                    # build_dev recusa train e test
+halves: [dev-select, dev-gate]
+sample_rate: 48000
+target:
+  min_s: 3.0                         # o alvo é a fala inteira (preserva a transcrição para o WER); interferente recortado
+  max_s: 10.0
+enrollment:
+  min_s: 6.0
+  max_s: 10.0
+  pause_s: [0.15, 0.40]
+noise:
+  # ruído de dev = reserva de 5% do ruído deduplicado (cctrain.m1.pools); repartido entre as metades por hash do SHA-256
+  split_by: sha256_parity
+interferer:
+  same_sex_only: true                # C3/C4: mesmo sexo, sexo SÓ declarado (falante sem sexo declarado fica fora)
+conditions:
+  # C0: alvo + ruído, SEM perfil (G1; TSOS C0/C1-C2 pelo alvo limpo). SNR percorre a grade, defasada por falante.
+  C0:
+    snr_db: [0.0, 5.0, 10.0, 15.0]
+    items_per_speaker: {default: 2, vctk-0.92: 4, cml-tts-pt: 4}
+    needs_sex: false
+  # C0c: alvo limpo sozinho (G3 TS3 e C8: TSOS do alvo real com enrollment inválido).
+  C0c:
+    items_per_speaker: {default: 1, vctk-0.92: 2, cml-tts-pt: 2}
+    needs_sex: false
+  # C3: concorrente SEM ruído, mesmo sexo, SIR 0 e 5 dB (score da seleção: SIR 0). Perfil = enrollment do próprio alvo.
+  C3:
+    sir_db: [0.0, 5.0]
+    items_per_speaker_per_sir: {default: 1, vctk-0.92: 3}
+    needs_sex: true
+  # C4: concorrente + ruído (SNR 10 dB, o do M1), mesmo sexo, SIR 0 e 5 dB.
+  C4:
+    sir_db: [0.0, 5.0]
+    snr_db: 10.0
+    items_per_speaker_per_sir: {default: 1, vctk-0.92: 3}
+    needs_sex: true
+  # C7 (G4): só o falante B fala, perfil = enrollment de outro falante A (mesmo / diferente sexo, ambos declarados).
+  C7:
+    sex_pair: [same, different]
+    items_per_speaker_per_pair: {default: 1, vctk-0.92: 2}
+    needs_sex: true

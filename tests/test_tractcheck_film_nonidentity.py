@@ -17,18 +17,14 @@ import pytest
 import torch
 
 from cctrain.eval.runtime_path import (
-    DEFAULT_THRESHOLDS,
     HOP,
-    NB_DF,
-    NB_ERB,
-    NORM_ALPHA,
-    SILENCE_MEAN_SQUARE,
-    EncoderStep,
     Stage,
-    apply_stages,
-    mean_square_f32,
+    TorchFrameModel,
+    _film_t,
     parity_mixture,
+    replica_features,
     run_replica,
+    split_film,
     stage_fractions,
     tract_gating,
 )
@@ -77,80 +73,13 @@ def film_vectors(profile: str) -> np.ndarray:
 
 
 def _split(vec: np.ndarray) -> dict[str, np.ndarray]:
-    return dict(zip(("gamma_enc", "beta_enc", "gamma_df", "beta_df"), np.split(vec, 4), strict=True))
-
-
-def _film_t(a: np.ndarray, b: np.ndarray) -> tuple[torch.Tensor, torch.Tensor]:
-    return torch.from_numpy(a)[None, None], torch.from_numpy(b)[None, None]
-
-
-def replica_features(audio: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Mesmas features que `run_replica` entrega ao modelo: só quadros ativos. -> (active, feat_erb, feat_spec)."""
-    from libdf import DF, erb, erb_norm, unit_norm
-
-    framed = np.asarray(audio, np.float32).reshape(-1, HOP)
-    active = np.flatnonzero([mean_square_f32(f) >= SILENCE_MEAN_SQUARE for f in framed])
-    state = DF(48_000, 960, HOP, NB_ERB, 2)
-    spec = state.analysis(np.ascontiguousarray(framed[active].reshape(1, -1)))
-    feat_erb = np.asarray(erb_norm(erb(spec, state.erb_widths()), NORM_ALPHA))[0]
-    feat_spec = np.asarray(unit_norm(np.ascontiguousarray(spec[..., :NB_DF]), NORM_ALPHA))[0]
-    return active, feat_erb.astype(np.float32), feat_spec
+    return split_film(vec)
 
 
 def _to_torch(feat_erb: np.ndarray, feat_spec: np.ndarray) -> tuple[torch.Tensor, torch.Tensor]:
     ferb = torch.from_numpy(np.ascontiguousarray(feat_erb, np.float32))[None, None]
     fspec = torch.from_numpy(np.stack([feat_spec.real, feat_spec.imag], 0).astype(np.float32))[None]
     return ferb, fspec
-
-
-class TorchFrameModel:
-    """`FrameModel` cujo cálculo é o do PyTorch (DFNet3 upstream + FiLM), pré-calculado e servido por quadro.
-
-    O estágio de cada quadro sai do lsnr do encoder (que roda sempre); os decoders só avançam nos quadros em que o
-    runtime os executa, então cada decoder roda sobre a subsequência dos quadros que o chamam, como o tract.
-    O encoder stateful do runtime equivale ao `enc` do PyTorch sobre os quadros sem `pad_feat` (a defasagem de
-    lookahead é feita pelos anéis de espectro da réplica).
-    """
-
-    def __init__(self, base, vec: np.ndarray, audio: np.ndarray):
-        _, self.feat_erb, self.feat_spec = replica_features(audio)
-        v = _split(vec)
-        ferb, fspec = _to_torch(self.feat_erb, self.feat_spec)
-        with torch.no_grad():
-            e0, e1, e2, e3, emb, c0, lsnr = base.enc(ferb, fspec, film=_film_t(v["gamma_enc"], v["beta_enc"]))
-            self.lsnr = lsnr.reshape(-1).numpy().astype(np.float32)
-            flags = [apply_stages(x, DEFAULT_THRESHOLDS) for x in self.lsnr]
-            erb_idx = [t for t, f in enumerate(flags) if f[0]]
-            df_idx = [t for t, f in enumerate(flags) if f[2]]
-            self.gains: dict[int, np.ndarray] = {}
-            self.coefs: dict[int, np.ndarray] = {}
-            if erb_idx:
-                i = torch.tensor(erb_idx)
-                m = base.erb_dec(emb[:, i], e3[:, :, i], e2[:, :, i], e1[:, :, i], e0[:, :, i])
-                self.gains = {t: m[0, 0, k].numpy().astype(np.float32) for k, t in enumerate(erb_idx)}
-            if df_idx:
-                i = torch.tensor(df_idx)
-                c = base.df_dec(emb[:, i], c0[:, :, i], film=_film_t(v["gamma_df"], v["beta_df"]))
-                c = c[0].numpy().reshape(len(df_idx), NB_DF, 5, 2)
-                self.coefs = {t: (c[k, ..., 0] + 1j * c[k, ..., 1]).astype(np.complex64)
-                              for k, t in enumerate(df_idx)}
-        self.t = 0
-
-    def reset(self) -> None:
-        self.t = 0
-
-    def encode(self, feat_erb: np.ndarray, feat_spec: np.ndarray) -> EncoderStep:
-        t = self.t
-        assert np.array_equal(np.asarray(feat_erb, np.float32), self.feat_erb[t]), f"features desalinhadas em {t}"
-        assert np.array_equal(np.asarray(feat_spec), np.stack([self.feat_spec[t].real, self.feat_spec[t].imag], -1))
-        self.t += 1
-        return EncoderStep(np.float32(self.lsnr[t]), {"t": t})
-
-    def erb_decode(self, step: EncoderStep) -> np.ndarray:
-        return self.gains[step.tensors["t"]]
-
-    def df_decode(self, step: EncoderStep) -> np.ndarray:
-        return self.coefs[step.tensors["t"]]
 
 
 @pytest.fixture(scope="module")
