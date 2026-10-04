@@ -4,9 +4,10 @@
 #
 # Duas metades DISJUNTAS POR FALA (mesmos falantes; o dev é pequeno): `dev-select` (seleção de checkpoint e escolhas das
 # ablações) e `dev-gate` (lida uma única vez, na Tarefa 8; nenhuma escolha a usa). Por falante, as falas do split `dev` são
-# ordenadas por hash e repartidas alternadamente entre as metades; dentro de cada metade, as primeiras falas somam o
-# enrollment (6-10 s, só de outras falas do falante) e as demais formam o pool de falas de mistura: o enrollment nunca é a
-# fala da mistura, e nenhuma fala (nem ruído) aparece nas duas metades.
+# ordenadas por hash e repartidas alternadamente entre as metades; dentro de cada metade, o enrollment (6-10 s, válido pela
+# validação do produto, até 12 tentativas com ordens diferentes de falas, como no M1) é montado só com falas do pool da
+# metade, e as falas que entram nele saem do pool de misturas: o enrollment nunca é a fala da mistura, e nenhuma fala (nem
+# ruído) aparece nas duas metades.
 version: 1
 spec: "docs/superpowers/specs/2026-10-03-clearcore-train-pdfnet3-enrollment-design.md §7; plano M2, Tarefa 4"
 seed: 20261004
@@ -19,7 +20,6 @@ target:
 enrollment:
   min_s: 6.0
   max_s: 10.0
-  pool_s: 10.6                       # soma de falas reservadas por falante e metade (10 s úteis + pausas)
   pause_s: [0.15, 0.40]
 noise:
   # ruído de dev = reserva de 5% do ruído deduplicado (cctrain.m1.pools); repartido entre as metades por hash do SHA-256

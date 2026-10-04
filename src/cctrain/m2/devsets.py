@@ -1,8 +1,8 @@
 """Dev do M2 pré-renderizado em duas metades disjuntas por fala (`dev-select`, `dev-gate`) e congelado por SHA-256.
 
 `build_dev` só aceita registros do split `dev` (recusa `train` e `test`). As falas de cada falante são ordenadas por hash e
-repartidas alternadamente entre as metades; dentro de uma metade, as primeiras reservam o enrollment (nunca entram em
-mistura) e as demais formam o pool de misturas. Condições (config `m2-devsets-v1.yaml`): C0 (alvo + ruído, sem perfil),
+repartidas alternadamente entre as metades; dentro de uma metade, o enrollment é montado com falas do pool (as que
+entram nele nunca entram em mistura) e as demais, com duração adequada, formam o pool de misturas. Condições (config `m2-devsets-v1.yaml`): C0 (alvo + ruído, sem perfil),
 C0c (alvo limpo sozinho), C3 (concorrente sem ruído, mesmo sexo), C4 (concorrente + ruído, mesmo sexo), C7 (locutor trocado,
 mesmo/diferente sexo). Sexo só declarado: falante sem sexo declarado fica fora de C3/C4/C7 (e de interferente/perfil).
 
@@ -62,7 +62,6 @@ class DevSetsConfig:
     target_max_s: float
     enroll_min_s: float
     enroll_max_s: float
-    enroll_pool_s: float
     pause_s: tuple[float, float]
     conditions: Mapping[str, Mapping]
     sha256: str
@@ -86,7 +85,7 @@ def load_devsets_config(path: Path = DEVSETS_V1) -> DevSetsConfig:
     return DevSetsConfig(
         seed=int(d["seed"]), source_split="dev", halves=HALVES, target_min_s=float(d["target"]["min_s"]),
         target_max_s=float(d["target"]["max_s"]), enroll_min_s=float(d["enrollment"]["min_s"]),
-        enroll_max_s=float(d["enrollment"]["max_s"]), enroll_pool_s=float(d["enrollment"]["pool_s"]),
+        enroll_max_s=float(d["enrollment"]["max_s"]),
         pause_s=(float(d["enrollment"]["pause_s"][0]), float(d["enrollment"]["pause_s"][1])),
         conditions=d["conditions"], sha256=digest)
 
@@ -108,13 +107,18 @@ def _dur(r: FileRecord) -> float:
 
 @dataclass(frozen=True)
 class HalfUtterances:
-    enroll: tuple[FileRecord, ...]
-    mix: tuple[FileRecord, ...]
+    """Falas de um falante numa metade, em ordem de hash. O enrollment é escolhido entre elas na construção
+    (`choose_enrollment`); o pool de misturas é o resto, com duração em [min_s, max_s]."""
+
+    pool: tuple[FileRecord, ...]
+
+    def mix_pool(self, enroll: Iterable[FileRecord], cfg: DevSetsConfig) -> tuple[FileRecord, ...]:
+        used = {r.path for r in enroll}
+        return tuple(r for r in self.pool if r.path not in used and cfg.target_min_s <= _dur(r) <= cfg.target_max_s)
 
 
 def partition_utterances(records: Iterable[FileRecord], cfg: DevSetsConfig) -> dict[str, dict[str, HalfUtterances]]:
-    """{speaker_key: {half: HalfUtterances}}: falas ordenadas por hash, alternadas entre as metades; em cada metade as
-    primeiras somam o enrollment (>= `pool_s`) e as demais, com duração em [min_s, max_s], formam o pool de misturas."""
+    """{speaker_key: {half: HalfUtterances}}: falas ordenadas por hash e alternadas entre as metades (disjuntas por fala)."""
     by_spk: dict[str, list[FileRecord]] = defaultdict(list)
     for r in records:
         if r.split != cfg.source_split:
@@ -124,18 +128,7 @@ def partition_utterances(records: Iterable[FileRecord], cfg: DevSetsConfig) -> d
     out: dict[str, dict[str, HalfUtterances]] = {}
     for spk, recs in sorted(by_spk.items()):
         ordered = sorted(recs, key=lambda r: _h(cfg.seed, "part", r.path))
-        out[spk] = {}
-        for k, half in enumerate(cfg.halves):
-            mine = ordered[k::len(cfg.halves)]
-            enroll, total = [], 0.0
-            for r in mine:
-                if total >= cfg.enroll_pool_s:
-                    break
-                enroll.append(r)
-                total += _dur(r) + 0.3
-            used = {r.path for r in enroll}
-            mix = tuple(r for r in mine if r.path not in used and cfg.target_min_s <= _dur(r) <= cfg.target_max_s)
-            out[spk][half] = HalfUtterances(tuple(enroll), mix)
+        out[spk] = {half: HalfUtterances(tuple(ordered[k::len(cfg.halves)])) for k, half in enumerate(cfg.halves)}
     return out
 
 
@@ -177,22 +170,36 @@ def _slug(speaker_key: str) -> str:
     return hashlib.sha256(speaker_key.encode()).hexdigest()[:16]
 
 
-def build_enrollment(root: Path, utts: Sequence[FileRecord], rng: np.random.Generator, cfg: DevSetsConfig
-                     ) -> np.ndarray | None:
-    """Enrollment de `enroll_min_s`..`enroll_max_s` (16 kHz) só das falas reservadas, com pausas; None se inválido."""
-    if not utts:
-        return None
-    want = float(rng.uniform(cfg.enroll_min_s, cfg.enroll_max_s))
-    parts: list[np.ndarray] = []
-    for r in utts:
-        x, sr = load_audio(Path(root) / r.path)
-        parts += [to_16k(x, sr), np.zeros(int(rng.uniform(*cfg.pause_s) * ENROLL_SR), np.float32)]
-    audio = np.concatenate(parts)[: int(want * ENROLL_SR)].astype(np.float32)
-    try:
-        check_enrollment_audio(audio)
-    except EnrollmentRejected:
-        return None
-    return audio
+def choose_enrollment(root: Path, pool: Sequence[FileRecord], rng: np.random.Generator, cfg: DevSetsConfig,
+                      tries: int = 12) -> tuple[np.ndarray, tuple[FileRecord, ...]] | None:
+    """Enrollment de `enroll_min_s`..`enroll_max_s` (16 kHz) só de falas do `pool` da metade, com pausas, válido pelo
+    `check_enrollment_audio` do produto (como no M1: várias tentativas com ordens diferentes de falas). Devolve o áudio e as
+    falas que de fato entram nele (só elas saem do pool de misturas); None se nenhuma tentativa valida."""
+    cache: dict[str, np.ndarray] = {}
+    for _ in range(tries):
+        want = float(rng.uniform(cfg.enroll_min_s, cfg.enroll_max_s))
+        n_want = int(want * ENROLL_SR)
+        parts, used, total = [], [], 0
+        for k in rng.permutation(len(pool)):
+            r = pool[int(k)]
+            if r.path not in cache:
+                x, sr = load_audio(Path(root) / r.path)
+                cache[r.path] = to_16k(x, sr)
+            used.append(r)
+            parts += [cache[r.path], np.zeros(int(rng.uniform(*cfg.pause_s) * ENROLL_SR), np.float32)]
+            total = sum(len(p) for p in parts)
+            if total >= n_want:
+                break
+        audio = np.concatenate(parts)[:n_want].astype(np.float32)
+        # só as falas que começam antes do corte entram no enrollment (as demais não foram usadas)
+        starts = np.cumsum([0] + [len(p) for p in parts])[::2][: len(used)]
+        used = [r for r, st in zip(used, starts, strict=True) if st < n_want]
+        try:
+            check_enrollment_audio(audio)
+        except EnrollmentRejected:
+            continue
+        return audio, tuple(used)
+    return None
 
 
 # --- construção ----------------------------------------------------------------------------------------------------
@@ -225,38 +232,41 @@ def _build_half(half: str, parts: Mapping[str, Mapping[str, HalfUtterances]], no
     out.mkdir(parents=True, exist_ok=True)
     seed = cfg.seed
     corpus = lambda k: k.split(":", 1)[0]  # noqa: E731
-    # enrollments
+    # enrollments (escolhidos no pool da metade; as falas usadas saem do pool de misturas)
     enroll_rows, embs = [], []
     enrolled: dict[str, int] = {}
+    mix_pool: dict[str, tuple[FileRecord, ...]] = {}
     for spk in sorted(parts):
         hu = parts[spk][half]
-        audio = build_enrollment(data_root, hu.enroll, _rng(seed, half, "enroll", spk), cfg)
-        if audio is None:
-            log(f"[{half}] {spk}: sem enrollment válido; fica fora")
+        chosen = choose_enrollment(data_root, hu.pool, _rng(seed, half, "enroll", spk), cfg)
+        if chosen is None:
+            log(f"[{half}] {corpus(spk)}:{_slug(spk)[:6]}: sem enrollment válido; fica fora")
             continue
+        audio, used_utts = chosen
+        mix_pool[spk] = hu.mix_pool(used_utts, cfg)
         meta = _save_npy(out / "enroll" / f"{_slug(spk)}.npy", _to_i16(audio))
         emb = np.asarray(embed(_from_i16(_to_i16(audio))), np.float32).reshape(EMB_DIM)
         enrolled[spk] = len(embs)
         embs.append(emb)
         enroll_rows.append({"speaker": spk, "corpus": corpus(spk), "sex": sex.get(spk), "audio": meta,
-                            "seconds": len(audio) / ENROLL_SR, "utterances": [r.path for r in hu.enroll],
+                            "seconds": len(audio) / ENROLL_SR, "utterances": [r.path for r in used_utts],
                             "embedding_row": enrolled[spk]})
     np.save(out / "enroll_emb.npy", np.stack(embs).astype(np.float32), allow_pickle=False)
     _write_jsonl(out / "enroll.jsonl", enroll_rows)
 
-    speakers = [s for s in sorted(parts) if parts[s][half].mix and s in enrolled]
+    speakers = [s for s in sorted(parts) if s in enrolled and mix_pool[s]]
     cursor: dict[str, int] = defaultdict(int)
-    perms = {s: _rng(seed, half, "perm", s).permutation(len(parts[s][half].mix)) for s in speakers}
+    perms = {s: _rng(seed, half, "perm", s).permutation(len(mix_pool[s])) for s in speakers}
 
     def next_target(spk: str) -> FileRecord:
-        pool = parts[spk][half].mix
+        pool = mix_pool[spk]
         r = pool[int(perms[spk][cursor[spk] % len(pool)])]
         cursor[spk] += 1
         return r
 
     def pick_interferer(spk: str, peers: Sequence[str], n: int, rng) -> tuple[str, FileRecord]:
         ispk = peers[int(rng.integers(len(peers)))]
-        pool = parts[ispk][half].mix
+        pool = mix_pool[ispk]
         long_enough = [r for r in pool if r.num_samples / r.sr * SR >= n] or list(pool)
         return ispk, long_enough[int(rng.integers(len(long_enough)))]
 
@@ -365,7 +375,7 @@ def _write_jsonl(path: Path, rows: Iterable[Mapping]) -> None:
 @dataclass(frozen=True)
 class DevItem:
     meta: Mapping
-    root: Path
+    root: Path | None  # None: metadados apenas (verificação de integridade do dev-gate); o áudio fica trancado
 
     def __getitem__(self, k: str):
         return self.meta[k]
@@ -375,9 +385,13 @@ class DevItem:
         return self.meta["id"]
 
     def noisy(self) -> np.ndarray:
+        if self.root is None:
+            raise DevGateLocked("metade aberta só para metadados (integridade); o áudio exige final_gate=True")
         return _from_i16(np.load(self.root / "audio" / self.meta["noisy"]["file"]))
 
     def clean(self) -> np.ndarray | None:
+        if self.root is None:
+            raise DevGateLocked("metade aberta só para metadados (integridade); o áudio exige final_gate=True")
         c = self.meta["clean"]
         return None if c is None else _from_i16(np.load(self.root / "audio" / c["file"]))
 
@@ -389,24 +403,27 @@ class DevEnrollment:
     sex: str | None
     seconds: float
     utterances: tuple[str, ...]
-    audio_file: Path
+    audio_file: Path | None
     embedding: np.ndarray
 
     def audio16k(self) -> np.ndarray:
+        if self.audio_file is None:
+            raise DevGateLocked("metade aberta só para metadados (integridade); o áudio exige final_gate=True")
         return _from_i16(np.load(self.audio_file))
 
 
 class DevHalf:
-    def __init__(self, name: str, root: Path):
+    def __init__(self, name: str, root: Path, *, meta_only: bool = False):
         self.name, self.root = name, Path(root)
-        self.items = [DevItem(json.loads(line), self.root) for line in (self.root / "items.jsonl").read_text().splitlines()]
+        audio_root = None if meta_only else self.root
+        self.items = [DevItem(json.loads(line), audio_root) for line in (self.root / "items.jsonl").read_text().splitlines()]
         emb = np.load(self.root / "enroll_emb.npy")
         self.enrollments: dict[str, DevEnrollment] = {}
         for line in (self.root / "enroll.jsonl").read_text().splitlines():
             d = json.loads(line)
             self.enrollments[d["speaker"]] = DevEnrollment(
                 d["speaker"], d["corpus"], d["sex"], d["seconds"], tuple(d["utterances"]),
-                self.root / "enroll" / d["audio"]["file"], emb[d["embedding_row"]])
+                None if meta_only else self.root / "enroll" / d["audio"]["file"], emb[d["embedding_row"]])
 
     def select(self, condition: str | None = None, **where) -> list[DevItem]:
         out = [i for i in self.items if condition is None or i["condition"] == condition]
@@ -417,11 +434,15 @@ class DevHalf:
         return None if p is None else self.enrollments[p].embedding
 
 
-def open_half(data_dir: Path, half: str, *, final_gate: bool = False, who: str = "") -> DevHalf:
-    """Abre uma metade. O `dev-gate` exige `final_gate=True` e registra a abertura (uso único, Tarefa 8)."""
+def open_half(data_dir: Path, half: str, *, final_gate: bool = False, who: str = "",
+              meta_only: bool = False) -> DevHalf:
+    """Abre uma metade. O `dev-gate` exige `final_gate=True` e registra a abertura (uso único, Tarefa 8).
+    `meta_only=True` lê só listas e metadados (disjunção, congelamento): sem áudio, sem trava e sem registro."""
     if half not in HALVES:
         raise DevSetsError(f"metade desconhecida: {half!r}")
     root = Path(data_dir) / half
+    if meta_only:
+        return DevHalf(half, root, meta_only=True)
     if half == "dev-gate":
         if not final_gate:
             raise DevGateLocked("dev-gate só abre com final_gate=True (Tarefa 8); nenhuma escolha o usa")

@@ -247,7 +247,8 @@ def replica_features(audio: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndar
     """Mesmas features que `run_replica` entrega ao modelo: só quadros ativos. -> (active, feat_erb, feat_spec)."""
     from libdf import DF, erb, erb_norm, unit_norm
 
-    framed = np.asarray(audio, np.float32).reshape(-1, HOP)
+    audio = np.asarray(audio, np.float32)
+    framed = audio[: len(audio) // HOP * HOP].reshape(-1, HOP)  # como run_replica: o resto < 1 hop é descartado
     active = np.flatnonzero([mean_square_f32(f) >= SILENCE_MEAN_SQUARE for f in framed])
     if active.size == 0:
         return active, np.zeros((0, NB_ERB), np.float32), np.zeros((0, NB_DF), np.complex64)

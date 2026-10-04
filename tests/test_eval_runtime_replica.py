@@ -64,6 +64,15 @@ def test_runtime_forward_shapes_and_alignment(base):
     assert RUNTIME_DELAY == 3 * HOP
 
 
+def test_runtime_forward_accepts_length_not_multiple_of_hop(base):
+    x = _tone_noise(50)
+    x = np.concatenate([x, x[:123]])
+    enh, stages = runtime_forward(base, None, x)
+    assert enh.shape == x.shape and stages.shape == (50,)
+    ref, _ = runtime_forward(base, None, x[: 50 * HOP])
+    assert np.array_equal(enh[: 50 * HOP], ref)
+
+
 def test_runtime_forward_neutral_film_equals_none(base):
     x = _tone_noise(40)
     a, sa = runtime_forward(base, None, x)

@@ -91,18 +91,27 @@ def test_build_dev_refuses_train_and_test(corpus, tmp_path, split):
         ds.build_dev(bad, noise, root, tmp_path, sex, fake_embed)
 
 
-def test_partition_is_disjoint_and_enrollment_is_separate(corpus):
+def test_partition_is_disjoint_across_halves(corpus):
     _, speech, _, _ = corpus
     cfg = ds.load_devsets_config()
     parts = ds.partition_utterances(speech, cfg)
     for spk, halves in parts.items():
         sel, gate = halves["dev-select"], halves["dev-gate"]
-        paths = [{r.path for r in h.enroll} | {r.path for r in h.mix} for h in (sel, gate)]
-        assert not (paths[0] & paths[1]), spk
-        for h in (sel, gate):
-            assert not ({r.path for r in h.enroll} & {r.path for r in h.mix})
-            assert sum(r.num_samples / r.sr for r in h.enroll) >= 6.0
-            assert all(cfg.target_min_s <= r.num_samples / r.sr <= cfg.target_max_s for r in h.mix)
+        assert not ({r.path for r in sel.pool} & {r.path for r in gate.pool}), spk
+        assert abs(len(sel.pool) - len(gate.pool)) <= 1
+    assert sum(len(h.pool) for hs in parts.values() for h in hs.values()) == len(speech)
+
+
+def test_enrollment_uses_only_pool_utterances_and_leaves_the_rest_for_mixtures(corpus):
+    root, speech, _, _ = corpus
+    cfg = ds.load_devsets_config()
+    pool = ds.partition_utterances(speech, cfg)["syn:s00"]["dev-select"]
+    audio, used = ds.choose_enrollment(root, pool.pool, ds._rng(1, "t"), cfg)
+    assert 6.0 * 16_000 <= len(audio) <= 10.0 * 16_000 and used
+    assert {r.path for r in used} <= {r.path for r in pool.pool}
+    mix = pool.mix_pool(used, cfg)
+    assert not ({r.path for r in used} & {r.path for r in mix}) and mix
+    assert all(cfg.target_min_s <= r.num_samples / r.sr <= cfg.target_max_s for r in mix)
 
 
 def test_partition_is_deterministic(corpus):
@@ -225,3 +234,16 @@ def test_verify_freeze_detects_tampering(corpus, tmp_path):
     np.save(victim, arr)
     with pytest.raises(ds.DevSetsError, match="SHA-256 não confere"):
         ds.verify_freeze(tmp_path / "d", freeze, deep=True)
+
+
+def test_meta_only_open_has_no_audio_and_leaves_no_trace(built):
+    out, _, _ = built
+    log = out / "dev-gate" / "opened.log"
+    before = log.read_text() if log.exists() else ""
+    gate = ds.open_half(out, "dev-gate", meta_only=True)
+    assert gate.items and gate.enrollments
+    with pytest.raises(ds.DevGateLocked):
+        gate.items[0].noisy()
+    with pytest.raises(ds.DevGateLocked):
+        next(iter(gate.enrollments.values())).audio16k()
+    assert (log.read_text() if log.exists() else "") == before
