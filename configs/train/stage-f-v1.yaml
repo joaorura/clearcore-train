@@ -1,0 +1,78 @@
+# Config do estágio F (T3, fine-tune completo), versão 1. Congelada pelo SHA-256 em stage-f-v1.sha256 antes da Tarefa 6
+# do M2 (plano 2026-10-03-m2-plan.md; spec rev. 2 §3.2, §4.3-4.4, §5.3-5.6, §7.3). Mudar qualquer valor exige uma
+# nova versão (stage-f-v2.yaml) com justificativa escrita; o validador (cctrain.m2.config) recusa o que sai da spec.
+# Decisão do dono de 2026-10-03 registrada aqui: AB1 = 1 seed completa por braço (p_enroll_denoise 0 e 0,5), sem ramos
+# herdados do checkpoint de 70% (≈ 13 h); o braço 0,5 é o próprio T3. AB2 continua em ramos (plano, Tarefa 7).
+version: 1
+stage: F
+seed: 0
+init:
+  # gerador FiLM do estágio C do M1 (checkpoint final, sem seleção no dev); base = DFNet3 v0.5.6 (SHA-256 do state_dict)
+  generator_checkpoint: stage-c-m1/checkpoints/ckpt-00020160.pt
+  generator_checkpoint_sha256: 400a20ae1ee03f24925ebe50932430951112d6befa1660afdb7ad5bc6e97fb59
+  base: dfnet3-upstream-v0.5.6
+  base_state_sha256: c4a1c6a5d6cc4ca8ba2bfbdc829ccd7ba7d87ab756e9898856306058805ad962
+freeze:
+  encoder: true             # speaker encoder congelado (o treino usa o banco de embeddings)
+  batchnorm: eval_frozen    # BatchNorm em eval() e parâmetros congelados (spec §5.3)
+  base_trainable: true      # DFNet3 + gerador treinam
+optimizer:
+  name: adamw
+  lr: 1.0e-4
+  schedule: cosine
+  epochs: 20
+  warmup_steps: 1000
+  weight_decay: 0.01        # herdado do estágio C
+  grad_clip: 1.0            # herdado do estágio C
+data:
+  batch_size: 16
+  segment_s: 3.0
+  epoch_audio_hours: 100.0  # budget-v1.t3: 120.000 segmentos = 7.500 passos por época
+  steps_per_epoch: 7500
+loss:
+  # base: perda do DFNet3 upstream sobre a saída com gating emulado (§3.5, §5.4)
+  base: {factor: 500.0, factor_complex: 500.0, gamma: 0.3, fft_sizes: [256, 512, 1024, 2048]}
+  lambda_t: 500.0           # L_T: destilação MR(Ŝ_aluno, Ŝ_DFNet3 congelado) só nas amostras mask=0
+  lambda_os: 500.0          # L_OS: over-suppression assimétrica, h(x)=max(x,0)
+  os_average: time_frequency  # média tempo-frequência
+  lambda_gate: 1.0e-3       # L_gate (§3.5)
+  ignore_above_max_freq: true
+film:
+  log_gamma_bound: 2.302585092994046   # Γ = ln 10 (≤ ln 100)
+  beta_bound: 4.0                      # B fixado no M0 (film-v1.yaml)
+  p_drop: 0.2                          # embedding dropout; AB2 varre {0,1; 0,3} em ramos
+mixing:
+  s: 0.05                              # fração "sem alvo" (locutor trocado → silêncio); AB2 varre {0; 10}%
+  base_fractions: {target_noise: 0.35, target_interferer: 0.20, target_interferer_noise: 0.35}  # ÷ 0,9 e × (1−s)
+  mask0_target: sum_of_dry_speakers    # sem perfil: alvo = soma das falas secas de todos os falantes (§4.4)
+  snr_grid_db: [-5.0, 0.0, 5.0, 10.0, 20.0, 40.0]
+  sir_db: [-5.0, 25.0]                 # U[−5, 25]
+  n_interferers: [1, 2]
+  p_two_interferers: 0.5               # spec diz "1 ou 2" sem fração: uniforme
+  p_rir: 0.3                           # aplicada a alvo e interferente separadamente; alvo da perda sem RIR
+  segment_s: 3.0
+  band_quota:                          # §4.3, estágio F, por batch
+    full_band_min: 0.5
+    khz24_target: 0.3
+    khz16_max: 0.2
+enrollment:
+  p_enroll_denoise: 0.5
+  bank: bank-m2-sbecapa-v2             # banco v2 com proveniência por variante (Tarefa 2)
+  duration_s: [6.0, 12.0]
+  never_mixture_utterance: true        # enrollment nunca é a fala da mistura (§4.4)
+checkpoint:
+  every_min: 30
+  keep_last: 3
+  keep_best: true
+  pin_epoch: 14                        # 70% do cosseno: ponto de ramificação da AB2
+ablations:
+  ab2:
+    mode: branches_from_pinned_epoch   # 6 épocas por ramo, um fator por vez (plano, Tarefa 7)
+    p_drop: [0.1, 0.3]
+    s: [0.0, 0.10]
+  ab1:
+    mode: full_run                     # decisão do dono (2026-10-03)
+    arms_p_enroll_denoise: [0.0, 0.5]  # o braço 0,5 é o T3
+    seeds_per_arm: 1
+    inherited_branches: false
+    label: indicativo
