@@ -87,3 +87,15 @@ def test_config_hash_is_stable_and_sensitive():
     a = {"lr": 1e-3, "nested": {"b": 2, "a": 1}}
     assert config_hash(a) == config_hash({"nested": {"a": 1, "b": 2}, "lr": 1e-3})
     assert config_hash(a) != config_hash({**a, "lr": 2e-3})
+
+
+def test_pinned_checkpoint_is_never_pruned(tmp_path):
+    m, opt, sched = _model_opt()
+    save_checkpoint(tmp_path, step=1, model=m.state_dict(), optimizer=opt, scheduler=sched,
+                    sampler_state={"epoch": 0, "index": 1}, cfg_hash="abc", commit=None, keep=1, pin=True)
+    for s in (2, 3, 4):
+        _save(tmp_path, s, m, opt, sched, keep=1)
+    assert sorted(p.name for p in tmp_path.glob("ckpt-*.pt")) == ["ckpt-00000001.pt", "ckpt-00000004.pt"]
+    from cctrain.train.checkpoint import pinned_steps
+
+    assert pinned_steps(tmp_path) == {1}

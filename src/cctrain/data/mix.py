@@ -48,6 +48,10 @@ def power(x: np.ndarray) -> float:
     return float(np.mean(np.asarray(x, dtype=np.float64) ** 2)) + 1e-20
 
 
+def ratio_gain(ref: np.ndarray, other: np.ndarray, ratio_db: float) -> float:
+    return float(np.sqrt(power(ref) / (power(other) * 10.0 ** (ratio_db / 10.0))))
+
+
 def scale_for_ratio(ref: np.ndarray, other: np.ndarray, ratio_db: float) -> np.ndarray:
     gain = np.sqrt(power(ref) / (power(other) * 10.0 ** (ratio_db / 10.0)))
     return np.asarray(other, dtype=np.float64) * gain  # float64: f32 rounding breaks the 1e-9 dB contract
@@ -76,6 +80,14 @@ class MixResult:
     kind: MixKind
     snr_db: float
     sir_db: float
+    # soma das falas secas de todos os falantes presentes, no nível em que entram na mistura e alinhadas ao atraso do
+    # caminho direto (alvo da perda sem perfil, spec §4.4, estágio F); None em chamadas antigas
+    clean_all: np.ndarray | None = None
+
+
+def _delayed(x: np.ndarray, delay: int, n: int) -> np.ndarray:
+    x = np.asarray(x, np.float64)
+    return np.concatenate([np.zeros(delay), x])[:n] if delay else x[:n]
 
 
 def direct_path_delay(h: np.ndarray) -> int:
@@ -98,15 +110,20 @@ def make_mixture(target: np.ndarray, interferers: Sequence[np.ndarray], noise: n
         wet = clean
     speech = wet.astype(np.float64)
     interf = None
+    dry_interf = np.zeros(n)
     if kind in (MixKind.TARGET_INTERFERER, MixKind.TARGET_INTERFERER_NOISE, MixKind.INTERFERER_ONLY):
         interf = np.zeros(n)
         for x in interferers:
             interf += apply_rir(x, rir_interferer) if rir_interferer is not None else np.asarray(x, np.float64)
         if has_target:
-            interf = scale_for_ratio(wet, interf, sir_db)
+            igain = ratio_gain(wet, interf, sir_db)
         else:
             ref = np.full(n, 10 ** (INTERFERER_ONLY_RMS_DBFS / 20.0))
-            interf = scale_for_ratio(ref, interf, 0.0)
+            igain = ratio_gain(ref, interf, 0.0)
+        interf = np.asarray(interf, np.float64) * igain
+        idelay = direct_path_delay(rir_interferer) if rir_interferer is not None else 0
+        for x in interferers:
+            dry_interf += _delayed(x, idelay, n) * igain
         speech = speech + interf
     noisy = speech
     if noise is not None and kind in (MixKind.TARGET_NOISE, MixKind.TARGET_INTERFERER_NOISE,
@@ -115,4 +132,6 @@ def make_mixture(target: np.ndarray, interferers: Sequence[np.ndarray], noise: n
         noisy = speech + scale_for_ratio(ref, noise, snr_db)
     gain = min(1.0, PEAK / max(float(np.max(np.abs(noisy))), 1e-9), PEAK / max(float(np.max(np.abs(clean))), 1e-9))
     sir_out = float(sir_db) if has_target else float("nan")
-    return MixResult((noisy * gain).astype(np.float32), (clean * gain).astype(np.float32), kind, snr_db, sir_out)
+    clean_all = ((np.asarray(clean, np.float64) + dry_interf) * gain).astype(np.float32)
+    return MixResult((noisy * gain).astype(np.float32), (clean * gain).astype(np.float32), kind, snr_db, sir_out,
+                     clean_all)

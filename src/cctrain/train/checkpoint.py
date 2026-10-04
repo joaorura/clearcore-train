@@ -23,6 +23,7 @@ import torch
 
 _NAME = re.compile(r"^ckpt-(\d{8})\.pt$")
 _BEST = "best.json"
+_PINNED = "pinned.json"
 FORMAT = 1
 
 
@@ -122,7 +123,8 @@ def _read(path: Path) -> Checkpoint | None:
 
 def save_checkpoint(directory: Path, *, step: int, model: Mapping, optimizer: torch.optim.Optimizer,
                     scheduler=None, sampler_state: Mapping, cfg_hash: str, commit: str | None,
-                    metric: float | None = None, keep: int = 3, extra: Mapping | None = None) -> Path:
+                    metric: float | None = None, keep: int = 3, extra: Mapping | None = None,
+                    pin: bool = False) -> Path:
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -139,6 +141,8 @@ def save_checkpoint(directory: Path, *, step: int, model: Mapping, optimizer: to
         os.fsync(fh.fileno())
     os.replace(tmp, final)
     _fsync_dir(directory)
+    if pin:
+        _pin(directory, step)
     _update_best(directory, step, metric)
     _prune(directory, keep)
     return final
@@ -163,6 +167,19 @@ def _update_best(directory: Path, step: int, metric: float | None) -> None:
         os.replace(tmp, best_path)
 
 
+def pinned_steps(directory: Path) -> set[int]:
+    p = Path(directory) / _PINNED
+    return {int(x) for x in json.loads(p.read_text())} if p.is_file() else set()
+
+
+def _pin(directory: Path, step: int) -> None:
+    """Fixa o checkpoint: `_prune` nunca o apaga (ex.: a época 14 do estágio F, ponto de ramificação da AB2)."""
+    steps = sorted(pinned_steps(directory) | {int(step)})
+    tmp = directory / (_PINNED + ".tmp")
+    tmp.write_text(json.dumps(steps) + "\n")
+    os.replace(tmp, directory / _PINNED)
+
+
 def best_step(directory: Path) -> int | None:
     p = Path(directory) / _BEST
     return int(json.loads(p.read_text())["step"]) if p.is_file() else None
@@ -171,7 +188,7 @@ def best_step(directory: Path) -> int | None:
 def _prune(directory: Path, keep: int) -> None:
     files = sorted(p for p in directory.glob("ckpt-*.pt") if _NAME.match(p.name))
     steps = [int(_NAME.match(p.name).group(1)) for p in files]
-    protect = set(steps[-keep:])
+    protect = set(steps[-keep:]) | pinned_steps(directory)
     best = best_step(directory)
     if best is not None:
         protect.add(best)
