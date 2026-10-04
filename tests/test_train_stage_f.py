@@ -463,7 +463,7 @@ def test_epoch_checkpoints_pin_the_chosen_epoch_and_a_branch_continues_the_cosin
     assert ck.extra["hp"]["p_drop"] == 0.5 and ck.extra["hp"]["s"] == 0.1 and ck.extra["init_sha256"] == sha256_file(pinned)
     log = [json.loads(x) for x in (tmp_path / "m2" / "ab2-x" / "loss-log.jsonl").read_text().splitlines()]
     assert [r["step"] for r in log] == [5, 6]
-    assert log[0]["lr"] == pytest.approx(1e-4 * 0.5 * (1 + math.cos(math.pi * 4 / 8)), rel=1e-6)  # cosseno do pai
+    assert log[0]["lr"] == pytest.approx(1e-4 * 0.5 * (1 + math.cos(math.pi * 5 / 8)), rel=1e-6)  # cosseno do pai
     with pytest.raises(ValueError, match="override"):
         branch(pinned, {"lr": 1.0}, 1, bank=bank, data=data, run_id="ab2-bad", max_hours=1.0, runs_dir=tmp_path)
     with pytest.raises(CheckpointError):  # ramo parte de fim de época, não de checkpoint de meio de época
