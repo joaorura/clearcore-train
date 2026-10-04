@@ -25,6 +25,7 @@ dependencies = [
     { name = "packaging" },
     { name = "psutil" },
     { name = "pyroomacoustics" },
+    { name = "pystoi" },
     { name = "pyyaml" },
     { name = "remotezip" },
     { name = "requests" },
@@ -54,6 +55,7 @@ requires-dist = [
     { name = "packaging", specifier = ">=23" },
     { name = "psutil", specifier = ">=5.9" },
     { name = "pyroomacoustics", specifier = ">=0.7.4" },
+    { name = "pystoi", specifier = ">=0.4" },
     { name = "pyyaml", specifier = ">=6" },
     { name = "remotezip", specifier = "==0.12.6" },
     { name = "requests", specifier = ">=2.31" },
@@ -674,6 +676,19 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/32/97/0b923cbce476573eec7d428ab108526c3728c3e7628f865bf181a6b81f1e/pyroomacoustics-0.10.1-cp311-cp311-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:ea84429fbfb55d0dab65f5acdbbd34bfc42f94436cf16d672ec8dff7df889837", size = 1269208, upload-time = "2026-05-01T13:35:19.898Z" },
     { url = "https://files.pythonhosted.org/packages/f6/fe/f1ba24fa63490800e1700d90e62a61756e45844f896e8bb0801347645fcf/pyroomacoustics-0.10.1-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:f729cf7e62a8663522a381629200e82ba9775bf5b75daed09c3155d85f164ee2", size = 1297491, upload-time = "2026-05-01T13:35:21.091Z" },
     { url = "https://files.pythonhosted.org/packages/53/8c/aae7fa470d6dc87b3ee7d1c912102b0a7bc8d1a8fbee00c929d5596e7e77/pyroomacoustics-0.10.1-cp311-cp311-win_amd64.whl", hash = "sha256:15cf8809d99449854d20f6ff343d0bb13bf9639db6efd0362a25866cc8cfae20", size = 704540, upload-time = "2026-05-01T13:35:22.517Z" },
+]
+
+[[package]]
+name = "pystoi"
+version = "0.4.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+    { name = "scipy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/bf/3d/1ae8bdb686c6aaaeef474aa6b790abbe38f42b61188b57a974dd9320e521/pystoi-0.4.1.tar.gz", hash = "sha256:1c6f50d6fbfee46b00c922458cdbd27228d9830ca81cea788fd600fc2f7de6e4", size = 10401, upload-time = "2023-12-29T16:48:05.726Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/1a/22/60cd92bd3ec00948800984410f4cf5ded5bd8e9b715729f3642efe0edb3d/pystoi-0.4.1-py2.py3-none-any.whl", hash = "sha256:e277b671663d26d35a2416c9c8010a74084e6c3970354506398051a554896939", size = 8218, upload-time = "2023-12-29T16:48:03.748Z" },
 ]
 
 [[package]]
