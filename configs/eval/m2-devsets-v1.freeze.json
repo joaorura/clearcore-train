@@ -1,0 +1,74 @@
+{
+  "by_half": {
+    "dev-gate": {
+      "C0": 222,
+      "C0c": 111,
+      "C3": 182,
+      "C4": 182,
+      "C7": 166
+    },
+    "dev-select": {
+      "C0": 222,
+      "C0c": 111,
+      "C3": 182,
+      "C4": 182,
+      "C7": 166
+    }
+  },
+  "config": "configs/eval/m2-devsets-v1.yaml",
+  "config_sha256": "14e1819e8988f86aaa016cb9646b595ba836a2fe1244d7de72e8d9c9da2a3c90",
+  "disjointness": {
+    "speakers": 95,
+    "utterances_gate": 1249,
+    "utterances_select": 1223
+  },
+  "files_verified": {
+    "dev-gate": 1544,
+    "dev-select": 1544
+  },
+  "halves": {
+    "dev-gate": {
+      "bytes": 741402835,
+      "enroll_emb_sha256": "3015035e45011c624404095df9cbfe4421bec4e35ac56ea877b7fcf553ffe2a6",
+      "enroll_sha256": "eb4c4c4e255dfbf02d43fd10d9922b3aea2a4ed39d351f45cf2d9715e54eb669",
+      "items_sha256": "28448bd0549920af5953028ea17e190597aa6c2eb33f6c1831bc03363c256aee",
+      "n_items": 863
+    },
+    "dev-select": {
+      "bytes": 735592873,
+      "enroll_emb_sha256": "5be41787acced393d0e90bd0db5c41a1c2d7c5939a5fd9364eca3ab7a34213f9",
+      "enroll_sha256": "b7cac8e87704ed33fedfb0e82959d4a36bd7bfecdaf8646619fa8d35407dabd7",
+      "items_sha256": "5997193d22d5f6ebfd211d6df45e66ae4b7106b5e32b180c541dd5f10c27fca8",
+      "n_items": 863
+    }
+  },
+  "speakers": {
+    "excluded": 3,
+    "excluded_by_corpus": {
+      "cml-tts-pt": 2,
+      "cv27-pt": 1
+    },
+    "excluded_by_corpus_sex": {
+      "cml-tts-pt/undeclared": 2,
+      "cv27-pt/undeclared": 1
+    },
+    "excluded_by_sex": {
+      "undeclared": 3
+    },
+    "kept": 95,
+    "kept_by_corpus": {
+      "cml-tts-pt": 8,
+      "cv27-pt": 39,
+      "librispeech-dev-clean": 40,
+      "vctk-0.92": 8
+    },
+    "kept_by_sex": {
+      "F": 30,
+      "M": 45,
+      "undeclared": 20
+    },
+    "total": 98
+  },
+  "speakers_sha256": "9ee4b89fb22a2746d092c1925711891c05cd79115746534a074815c46a3e459c",
+  "version": 1
+}

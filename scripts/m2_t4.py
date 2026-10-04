@@ -158,15 +158,17 @@ def cmd_calibrate(a) -> None:
         return
     save("t4_tsos_calibration.json", res)
     log(f"TSOS do DFNet3 (convenção fixa): {summary}")
-    if not rep["freeze"]:
+    if not (rep["freeze"] or a.force):
         log(f"NÃO congelado: DFNet3 em {GATING_CONDITION} muito fora da faixa do paper. {OWNER_DECISION}")
         return
     TSOS_YAML.write_text(
         "# tsos_config v1: convenção FIXA (nada foi calibrado): áudio float [-1, 1], amplitude_scale 1, p e gamma do paper, STFT 20/10 ms\n"
         "# (a do DeepFilterNet). Congelado pelo SHA-256 em tsos-config-v1.sha256 ANTES de qualquer leitura do G3. O DFNet3 upstream foi\n"
         "# MEDIDO no dev-select (plausibilidade contra a faixa do baseline do paper na condição certa): docs/plans/m2-reports/t4.md.\n"
+        "# Decisão do dono: Opção A: convenção fixa mantida, G3 por critério relativo <= DFNet3 + 0.5 pp.\n"
         "# Os níveis do G3 não mudam.\n"
         "version: 1\n"
+        "decision: \"Opção A: convenção fixa mantida, G3 por critério relativo <= DFNet3 + 0.5 pp\"\n"
         f"plausibility: {{split: dev-select, gating_condition: {GATING_CONDITION}, "
         f"dfnet3_tsos_pct: {json.dumps({c: round(v['tsos_pct'], 3) for c, v in rep['conditions'].items()})}, "
         f"dev_select_items_sha256: {res['dev_items_sha256']}}}\n"
@@ -291,6 +293,7 @@ def main() -> None:
     c = sub.add_parser("calibrate")
     c.add_argument("--dev-dir", default="", help="ensaio em outro diretório (não congela nada)")
     c.add_argument("--max-items", type=int, default=0, help="limita itens por condição (0 = todos)")
+    c.add_argument("--force", action="store_true", help="força o congelamento após decisão do dono")
     s = sub.add_parser("smoke")
     s.add_argument("--n", type=int, default=12)
     s.add_argument("--dev-dir", default="")
