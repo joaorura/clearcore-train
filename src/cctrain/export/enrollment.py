@@ -131,3 +131,34 @@ def scale_to_rms_dbfs(x: np.ndarray, dbfs: float) -> np.ndarray:
 
 def scale_to_peak(x: np.ndarray, peak: float) -> np.ndarray:
     return (np.asarray(x, np.float64) * (peak / float(np.max(np.abs(x))))).astype(np.float32)
+
+
+def build_stage_f_enrollment_model(sb_ckpt_dir: Path, ckpt_path: Path) -> EnrollmentModel:
+    """Carrega o modelo completo de enrollment com ECAPA SpeechBrain e gerador FiLM do Estágio F."""
+    from cctrain.models.film import FilmGenerator, load_film_config
+    from cctrain.models.sb_port import build_enrollment, load_speechbrain_state, port_ecapa
+
+    encoder = port_ecapa(load_speechbrain_state(sb_ckpt_dir))
+    cfg = load_film_config()
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    film_state = {k[len("film."):]: v for k, v in ckpt["model"].items() if k.startswith("film.")}
+    gen = FilmGenerator(cfg)
+    gen.load_state_dict(film_state)
+    return build_enrollment(encoder, gen).eval()
+
+
+def build_stage_f_enrollment_asset(
+    sb_ckpt_dir: Path,
+    ckpt_path: Path,
+    out_tar_gz: Path,
+    out_onnx_path: Path | None = None,
+) -> object:
+    """Exporta o enrollment.onnx do Estágio F e o empacota em voice-enrollment-asset-v1.tar.gz."""
+    from cctrain.export.pack import pack_asset
+
+    out_tar_gz = Path(out_tar_gz)
+    onnx_path = out_onnx_path or out_tar_gz.parent / "enrollment.onnx"
+    model = build_stage_f_enrollment_model(sb_ckpt_dir, ckpt_path)
+    export_enrollment_onnx(model, onnx_path)
+    return pack_asset(out_tar_gz, [("enrollment.onnx", onnx_path)])
+

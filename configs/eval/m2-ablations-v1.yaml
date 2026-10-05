@@ -1,0 +1,72 @@
+# Grade e protocolo das ablações do M2 (AB2 em ramos e controle AB1 completo), versão 1.
+# Pré-registrada e congelada antes da execução dos ramos da Tarefa 7 (plano 2026-10-03-m2-plan.md, Onda 3).
+version: 1
+spec: "docs/superpowers/specs/2026-10-03-clearcore-train-pdfnet3-enrollment-design.md (rev. 2)"
+selection_config: configs/eval/m2-selection-v1.yaml
+gates_file: configs/eval/gates-v2.yaml
+
+# Base de branching para a AB2:
+# O plano original previa ramificar a partir de 70% (época 14) de 20 épocas. Com a convergência rápida do T3 e parada
+# antecipada por early stopping na época 11, o pico ótimo de separação C3 ocorreu na Época 3 (+1,79 dB, passo 22.500).
+# O checkpoint ckpt-00022500.pt foi eleito no relatório oficial docs/plans/m2-reports/t6.md como base dos ramos da AB2.
+base_checkpoint:
+  run_id: t3
+  epoch: 3
+  step: 22500
+  path: runs/m2/t3/checkpoints/ckpt-00022500.pt
+  sha256: d5c0fbd7983534e909a991fe68eed17347ae6eb82becd4b2f2904ed86a6d4f7e
+  score_c3_delta_si_sdr_db: 1.7927066931318985
+  c0_eligible: true
+
+ab2:
+  description: "Ablação AB2: ramos de 6 épocas a partir do melhor checkpoint do T3, avaliados no dev-select"
+  epochs_per_branch: 6
+  branch_base_sha256: d5c0fbd7983534e909a991fe68eed17347ae6eb82becd4b2f2904ed86a6d4f7e
+  baseline:
+    run_id: t3
+    p_drop: 0.2
+    s: 0.05
+    seed: 0
+  stage_1_pdrop:
+    description: "Variação de p_drop mantendo s=0.05 fixo"
+    branches:
+      - run_id: ab2-pdrop01
+        p_drop: 0.1
+        s: 0.05
+        seed: 0
+      - run_id: ab2-pdrop03
+        p_drop: 0.3
+        s: 0.05
+        seed: 0
+    decision_rule: "menor p_drop que passa G1 (lido pelo limite do IC), G4 e C8 no dev-select; se nenhum passa G1 e G4 juntos, G1 não é relaxado"
+  stage_2_swap:
+    description: "Variação de s (speaker swap) com o melhor p_drop eleito no stage 1"
+    branches:
+      - run_id: ab2-s00
+        s: 0.0
+        seed: 0
+      - run_id: ab2-s10
+        s: 0.10
+        seed: 0
+    decision_rule: "maior escore C3 entre os elegíveis mantendo conformidade com G1 e G4"
+
+ab1:
+  description: "Ablação AB1: efeito do enrollment denoisado (1 seed por braço, sem ramos herdados, indicativo)"
+  design: full_run_one_seed_per_arm
+  label: indicativo
+  init_checkpoint: stage-c-m1/checkpoints/ckpt-00020160.pt
+  init_checkpoint_sha256: 400a20ae1ee03f24925ebe50932430951112d6befa1660afdb7ad5bc6e97fb59
+  max_epochs: 20
+  arms:
+    control:
+      run_id: ab1-p0
+      p_enroll_denoise: 0.0
+      p_drop: 0.2
+      s: 0.05
+      seed: 0
+    treated:
+      run_id: t3
+      p_enroll_denoise: 0.5
+      p_drop: 0.2
+      s: 0.05
+      seed: 0
