@@ -7,3 +7,5 @@ __pycache__/
 /delivery/
 /build/
 tools/tract-check/target/
+/manifests/files/noise-local-mics.jsonl
+/manifests/sources/noise-local-mics.yaml
