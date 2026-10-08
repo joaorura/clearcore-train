@@ -16,6 +16,7 @@ sources:
   librispeech-test-clean: {rule: official}
   cml-tts-pt: {rule: official}
   tts-portuguese-corpus: {rule: train}
+  speech-joao-messias: {rule: train}
   # Common Voice: o dev (calibração do limiar de EER do filtro) sai dos `client_id` com >= min_clips clipes antes do
   # filtro; o teste sai dos retidos pelo filtro (spec §4.6). Os demais clientes ficam em treino.
   cv27-pt:

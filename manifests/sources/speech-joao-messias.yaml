@@ -1,0 +1,11 @@
+id: speech-joao-messias
+name: "Gravações autorais de fala limpa João Messias (Clearcore Voice Target)"
+url: "local://data/raw/speech-joao-messias"
+landing_page: "https://github.com/joaorura/clearcore"
+license: LicenseRef-cctrain-generated
+license_evidence: "Gravações autorais registradas para treino e adaptação da voz alvo do Clearcore"
+role: train
+attribution: "Clearcore author voice dataset"
+native_sr: 48000
+access: local_directory
+restrictions: [local_only]

@@ -176,6 +176,11 @@ def discover_clean_speech(explicit_path: Path | None) -> Path:
 
     paths = Paths.from_env()
 
+    # Opção 0: Gravações reais em speech-joao-messias
+    user_speech = paths.data / "raw" / "speech-joao-messias"
+    if user_speech.is_dir() and any(user_speech.glob("*.wav")):
+        return user_speech
+
     # Opção A: Arquivo concatenado do subprojeto de áudio de teste se existir
     for candidate_file in [
         repo_root().parents[1] / "test_audio" / "cml_tts_pt_concatenated.wav",

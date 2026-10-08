@@ -79,10 +79,150 @@ def dfnet_loss(pred: Tensor, target: Tensor, max_freq: float | Tensor | None = N
     return loss
 
 
-def over_suppression_loss(pred: Tensor, target: Tensor, max_freq: float | Tensor | None = None, *, sr: int = SR,
-                          n_ffts: tuple[int, ...] = N_FFTS, gamma: float = GAMMA, factor: float = OS_FACTOR
-                          ) -> Tensor:
-    """`L_OS = λ_OS · média_res média_TF h(|S|^γ − |Ŝ|^γ)²`, `h(x) = max(x, 0)`: só pune módulo abaixo do alvo."""
+def formant_frequency_weights(
+    n_fft: int,
+    sr: int = SR,
+    device: torch.device | None = None,
+    *,
+    formant_band: tuple[float, float] = (300.0, 3400.0),
+    formant_weight: float = 2.5,
+    outer_low_freq: float = 150.0,
+    outer_low_weight: float = 0.2,
+    outer_high_freq: float = 5000.0,
+    outer_high_weight: float = 0.2,
+) -> tuple[Tensor, Tensor]:
+    """Máscara de frequências psicoacústicas para proteção de formantes da fala.
+
+    - Banda de formantes (300 Hz a 3400 Hz): peso elevado (ex: 2.5x).
+    - Bandas externas (< 150 Hz e > 5000 Hz): peso reduzido (ex: 0.2x), tolerando
+      cancelamento agressivo de ruídos de ventoinha e sub-graves.
+    - Faixas de transição: interpolação linear suave.
+
+    Retorna `(weights, formant_mask)` com forma `[F, 1]`.
+    """
+    freqs = torch.arange(n_fft // 2 + 1, device=device, dtype=torch.float32) * (sr / n_fft)
+    weights = torch.ones_like(freqs)
+
+    f_low, f_fstart = outer_low_freq, formant_band[0]
+    f_fend, f_high = formant_band[1], outer_high_freq
+
+    # Banda externa grave (< f_low): tolerância alta (peso reduzido)
+    weights[freqs < f_low] = outer_low_weight
+
+    # Transição f_low -> f_fstart
+    mask_trans_low = (freqs >= f_low) & (freqs < f_fstart)
+    if bool(mask_trans_low.any()) and (f_fstart > f_low):
+        t = (freqs[mask_trans_low] - f_low) / (f_fstart - f_low)
+        weights[mask_trans_low] = outer_low_weight + t * (formant_weight - outer_low_weight)
+
+    # Banda de formantes de voz (300 a 3400 Hz): peso elevado
+    mask_formant = (freqs >= f_fstart) & (freqs <= f_fend)
+    weights[mask_formant] = formant_weight
+
+    # Transição f_fend -> f_high
+    mask_trans_high = (freqs > f_fend) & (freqs <= f_high)
+    if bool(mask_trans_high.any()) and (f_high > f_fend):
+        t = (freqs[mask_trans_high] - f_fend) / (f_high - f_fend)
+        weights[mask_trans_high] = formant_weight + t * (outer_high_weight - formant_weight)
+
+    # Banda externa aguda (> f_high): tolerância alta (peso reduzido)
+    weights[freqs > f_high] = outer_high_weight
+
+    return weights.unsqueeze(-1), mask_formant.to(torch.float32).unsqueeze(-1)
+
+
+def asymmetric_formant_loss(
+    pred: Tensor,
+    target: Tensor,
+    max_freq: float | Tensor | None = None,
+    *,
+    sr: int = SR,
+    n_ffts: tuple[int, ...] = N_FFTS,
+    gamma: float = GAMMA,
+    factor: float = OS_FACTOR,
+    formant_band: tuple[float, float] = (300.0, 3400.0),
+    formant_weight: float = 2.5,
+    outer_low_freq: float = 150.0,
+    outer_low_weight: float = 0.2,
+    outer_high_freq: float = 5000.0,
+    outer_high_weight: float = 0.2,
+    extra_formant_penalty: float = 1.0,
+) -> Tensor:
+    """Loss Assimétrica Ponderada por Formantes da Fala.
+
+    Aplica máscara psicoacústica em múltiplas resoluções STFT:
+    - Banda de formantes (300 Hz a 3.400 Hz): peso elevado (2.5x) com penalidade
+      quadrática extra (1.0 + extra_formant_penalty * err) para punir rigorosamente
+      over-suppression e evitar corte de vogais e consoantes.
+    - Bandas externas (< 150 Hz e > 5.000 Hz): peso reduzido (0.2x), com alta tolerância
+      para cancelamento agressivo de ruídos de ventoinha e sub-graves.
+    - Só penaliza atenuação abaixo do alvo (h(x) = relu(x)), como L_OS.
+    """
+    loss = torch.zeros((), device=pred.device, dtype=pred.dtype)
+    for n_fft in n_ffts:
+        y_abs = _stft(pred, n_fft).abs().clamp_min(_EPS).pow(gamma)
+        s_abs = _stft(target, n_fft).abs().clamp_min(_EPS).pow(gamma)
+        w = _bin_weights(max_freq, n_fft, pred.shape[0], sr, pred.device)
+        fw, fmask = formant_frequency_weights(
+            n_fft,
+            sr,
+            pred.device,
+            formant_band=formant_band,
+            formant_weight=formant_weight,
+            outer_low_freq=outer_low_freq,
+            outer_low_weight=outer_low_weight,
+            outer_high_freq=outer_high_freq,
+            outer_high_weight=outer_high_weight,
+        )
+        diff = F.relu(s_abs - y_abs)
+        err = diff ** 2
+        if extra_formant_penalty > 0.0:
+            err = err * (1.0 + fmask * extra_formant_penalty * err)
+        err = err * fw
+        loss = loss + _masked_mean(err, w)
+    return loss / len(n_ffts) * factor
+
+
+def over_suppression_loss(
+    pred: Tensor,
+    target: Tensor,
+    max_freq: float | Tensor | None = None,
+    *,
+    sr: int = SR,
+    n_ffts: tuple[int, ...] = N_FFTS,
+    gamma: float = GAMMA,
+    factor: float = OS_FACTOR,
+    use_formant_weights: bool = False,
+    formant_band: tuple[float, float] = (300.0, 3400.0),
+    formant_weight: float = 2.5,
+    outer_low_freq: float = 150.0,
+    outer_low_weight: float = 0.2,
+    outer_high_freq: float = 5000.0,
+    outer_high_weight: float = 0.2,
+    extra_formant_penalty: float = 1.0,
+) -> Tensor:
+    """`L_OS = λ_OS · média_res média_TF h(|S|^γ − |Ŝ|^γ)²`, `h(x) = max(x, 0)`: só pune módulo abaixo do alvo.
+
+    Quando `use_formant_weights=True`, aplica a ponderação de formantes psicoacústica
+    e penalidade quadrática extra da `asymmetric_formant_loss`.
+    """
+    if use_formant_weights:
+        return asymmetric_formant_loss(
+            pred,
+            target,
+            max_freq,
+            sr=sr,
+            n_ffts=n_ffts,
+            gamma=gamma,
+            factor=factor,
+            formant_band=formant_band,
+            formant_weight=formant_weight,
+            outer_low_freq=outer_low_freq,
+            outer_low_weight=outer_low_weight,
+            outer_high_freq=outer_high_freq,
+            outer_high_weight=outer_high_weight,
+            extra_formant_penalty=extra_formant_penalty,
+        )
     loss = torch.zeros((), device=pred.device, dtype=pred.dtype)
     for n_fft in n_ffts:
         y_abs = _stft(pred, n_fft).abs().clamp_min(_EPS).pow(gamma)
@@ -120,10 +260,11 @@ def local_snr_loss(lsnr: Tensor, target_lsnr: Tensor, keep: Tensor | None = None
 
 
 def stage_c_loss(pred: Tensor, target: Tensor, lsnr: Tensor, lsnr_target: Tensor, *, lsnr_mask: Tensor,
-                 interferer_frames: Tensor, max_freq: float | Tensor | None = None) -> dict[str, Tensor]:
+                 interferer_frames: Tensor, max_freq: float | Tensor | None = None,
+                 use_formant_loss: bool = False, **os_kwargs) -> dict[str, Tensor]:
     """Perda do estágio C sem destilação: MR do DFNet3 + over-suppression + L_gate + LocalSnr (mascarada)."""
     mr = dfnet_loss(pred, target, max_freq)
-    os_ = over_suppression_loss(pred, target, max_freq)
+    os_ = over_suppression_loss(pred, target, max_freq, use_formant_weights=use_formant_loss, **os_kwargs)
     gate = gate_loss(lsnr, interferer_frames)
     ls = local_snr_loss(lsnr, lsnr_target, lsnr_mask)
     return {"total": mr + os_ + gate + ls, "mr": mr, "os": os_, "gate": gate, "lsnr": ls}

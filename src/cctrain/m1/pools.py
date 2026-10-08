@@ -15,7 +15,7 @@ from cctrain.data.manifest import FILES_DIR, FileRecord, read_file_manifest
 from cctrain.data.splits import apply_splits, assign_splits, dedupe_by_sha256, load_split_config
 from cctrain.paths import Paths
 
-NOISE_MANIFESTS = ("dns-noise-fullband-cc0", "fsd50k-eval-cc0", "fsd50k-eval-ccby")
+NOISE_MANIFESTS = ("dns-noise-fullband-cc0", "fsd50k-eval-cc0", "fsd50k-eval-ccby", "noise-local-mics")
 RIR_MANIFEST = "rir-synthetic-v2"
 NOISE_DEV_FRACTION = 0.05
 NOISE_SEED = 20261003
