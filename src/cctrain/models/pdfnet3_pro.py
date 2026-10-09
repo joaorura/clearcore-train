@@ -25,7 +25,48 @@ from cctrain.models.film import FilmGenerator
 from cctrain.models.pdfnet3 import PDFNet3
 
 
+
+class FrequencyDWConvMixer(nn.Module):
+    """Dual-Path Frequency Mixer (Depthwise na frequência + Pointwise)."""
+    def __init__(self, in_channels: int = 1, kernel_size: int = 9, zero_init: bool = True):
+        super().__init__()
+        pad_f = kernel_size // 2
+        
+        # Convolução Depthwise ao longo do eixo de frequência (T, F)
+        self.dw_conv = nn.Conv2d(
+            in_channels=in_channels,
+            out_channels=in_channels,
+            kernel_size=(1, kernel_size),
+            padding=(0, pad_f),
+            groups=in_channels,
+            bias=False
+        )
+        
+        self.norm = nn.BatchNorm2d(in_channels)
+        self.act = nn.GELU()
+        
+        # Convolução Pointwise 1x1 combinando canais
+        self.pw_conv = nn.Conv2d(
+            in_channels=in_channels,
+            out_channels=in_channels,
+            kernel_size=1,
+            bias=False
+        )
+        
+        if zero_init:
+            nn.init.zeros_(self.pw_conv.weight)
+
+    def forward(self, x: Tensor) -> Tensor:
+        # x: [B, C, T, F]
+        res = x
+        x = self.dw_conv(x)
+        x = self.norm(x)
+        x = self.act(x)
+        x = self.pw_conv(x)
+        return x + res
+
 class PDFNet3Pro(PDFNet3):
+
     """Modelo pDFNet3 Pro com Dual-Conditioning: FiLM Macro + Cross-Attention Fina em Sub-bandas."""
 
     def __init__(
@@ -43,6 +84,8 @@ class PDFNet3Pro(PDFNet3):
             cfg = cross_attention_config or SubbandCrossAttentionConfig()
             self.cross_attn = CausalSubbandCrossAttention(cfg)
         self.enable_cross_attention = enable_cross_attention
+        zero_init = self.cross_attn.cfg.zero_init
+        self.freq_mixer = FrequencyDWConvMixer(in_channels=1, kernel_size=9, zero_init=zero_init)
 
     def forward(
         self,
@@ -53,6 +96,7 @@ class PDFNet3Pro(PDFNet3):
         mask: Tensor,
         cross_attention: bool | None = None,
         return_attention_details: bool = False,
+        speaker_tokens: Tensor | None = None,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor] | tuple[tuple[Tensor, Tensor, Tensor, Tensor], SubbandAttentionOutput]:
         """Forward do pDFNet3Pro com suporte a Dual-Conditioning e fallback gracioso.
 
@@ -64,6 +108,7 @@ class PDFNet3Pro(PDFNet3):
             mask: Máscara de perfil / gating [B, 1]
             cross_attention: Override explícito para ligar/desligar cross-attention (None usa flag padrão)
             return_attention_details: Se True, retorna também o objeto SubbandAttentionOutput
+            speaker_tokens: Opcional. Dicionário de memória do falante multi-token [B, K, token_dim].
 
         Returns:
             (spec_e, m, lsnr, df_coefs) ou ((spec_e, m, lsnr, df_coefs), attn_details)
@@ -99,6 +144,11 @@ class PDFNet3Pro(PDFNet3):
         pad_erb = self.base.pad_feat(feat_erb)
         pad_spec = self.base.pad_feat(feat_spec_perm)
 
+        # Aplica o FrequencyDWConvMixer no fluxo antes da GRU temporal stateful
+        delta_erb = self.freq_mixer(pad_erb) - pad_erb
+        mask_t = mask.view(-1, 1, 1, 1)
+        pad_erb = pad_erb + delta_erb * mask_t
+
         # Executa Encoder com FiLM macro
         e0, e1, e2, e3, emb, c0, lsnr = self.base.enc(
             pad_erb,
@@ -108,7 +158,8 @@ class PDFNet3Pro(PDFNet3):
 
         # 3. Fine Conditioning: Cross-Attention Causal em Sub-bandas
         # Condiciona os embeddings temporais e calcula os ganhos finos nas bandas de voz
-        attn_out = self.cross_attn(emb, embedding, mask=mask)
+        ca_input = speaker_tokens if speaker_tokens is not None else embedding
+        attn_out = self.cross_attn(emb, ca_input, mask=mask)
         emb_conditioned = attn_out.output
 
         # LSNR Dropout (se habilitado no modelo base)

@@ -38,6 +38,8 @@ class SubbandCrossAttentionConfig:
     gain_bound: float = 0.5  # Limite máximo de modulação fina de ganho em sub-bandas
     dropout: float = 0.0  # Dropout (0.0 para inferência determinística)
     zero_init: bool = True  # Inicialização com zero para identidade exata no início
+    num_tokens: int = 8  # Número de tokens no Speaker Memory Dictionary
+    token_dim: int = 64  # Dimensão de cada token
 
     @property
     def num_voice_bands(self) -> int:
@@ -98,9 +100,11 @@ class CausalSubbandCrossAttention(nn.Module):
         # Projeção de Query (a partir dos embeddings temporais do encoder)
         self.q_proj = nn.Linear(self.cfg.query_dim, proj_dim, bias=True)
 
-        # Projeção do vetor biométrico da voz para chaves e valores nas sub-bandas
-        # Cada sub-banda vocal recebe seu próprio token biométrico projetado
-        self.bio_to_kv = nn.Linear(self.cfg.embedding_dim, num_voice * proj_dim * 2, bias=True)
+        # Fallback de projeção para entradas [B, embedding_dim] -> [B, num_tokens * token_dim]
+        self.fallback_proj = nn.Linear(self.cfg.embedding_dim, self.cfg.num_tokens * self.cfg.token_dim, bias=True)
+
+        # Projeção dos tokens biométricos para chaves e valores
+        self.bio_to_kv = nn.Linear(self.cfg.token_dim, proj_dim * 2, bias=True)
 
         # Projeção de saída temporal (residual para os embeddings do encoder)
         self.out_proj = nn.Linear(proj_dim, self.cfg.query_dim, bias=True)
@@ -110,6 +114,15 @@ class CausalSubbandCrossAttention(nn.Module):
 
         self.scale = 1.0 / math.sqrt(float(head_dim))
         self.dropout = nn.Dropout(self.cfg.dropout) if self.cfg.dropout > 0.0 else nn.Identity()
+
+        # Envelope espectral suave nas bordas das sub-bandas vocais
+        window = torch.ones(num_voice)
+        if num_voice >= 4:
+            # Envelope cosseno suave (Hann)
+            hw = torch.hann_window(6)
+            window[:3] = hw[:3]
+            window[-3:] = hw[-3:]
+        self.register_buffer("freq_envelope", window)
 
         if self.cfg.zero_init:
             nn.init.zeros_(self.out_proj.weight)
@@ -143,8 +156,13 @@ class CausalSubbandCrossAttention(nn.Module):
         proj_dim = self.cfg.proj_dim
 
         # Adequação de formato do embedding biométrico
-        if embedding.ndim == 3:
+        if embedding.ndim == 3 and embedding.shape[1] == 1:
             embedding = embedding.squeeze(1)
+
+        if embedding.ndim == 2:
+            # Fallback para vetor único [B, E] -> projeção para K tokens
+            embedding = self.fallback_proj(embedding)
+            embedding = embedding.view(b, self.cfg.num_tokens, self.cfg.token_dim)
 
         # Máscara padrão (1.0 se não fornecida)
         if mask is None:
@@ -156,14 +174,14 @@ class CausalSubbandCrossAttention(nn.Module):
         q = self.q_proj(query)  # [B, T, proj_dim]
         q = q.view(b, t, num_heads, head_dim).transpose(1, 2)  # [B, H, T, head_dim]
 
-        # 2. Projeção do vetor biométrico da voz em tokens de sub-banda Key e Value
-        bio_kv = self.bio_to_kv(embedding)  # [B, num_voice * proj_dim * 2]
+        # 2. Projeção dos tokens da voz em Key e Value
+        bio_kv = self.bio_to_kv(embedding)  # [B, K, proj_dim * 2]
         bio_k, bio_v = bio_kv.chunk(2, dim=-1)
-        k = bio_k.view(b, num_voice, num_heads, head_dim).permute(0, 2, 1, 3)  # [B, H, num_voice, head_dim]
-        v = bio_v.view(b, num_voice, num_heads, head_dim).permute(0, 2, 1, 3)  # [B, H, num_voice, head_dim]
+        k = bio_k.view(b, self.cfg.num_tokens, num_heads, head_dim).permute(0, 2, 1, 3)  # [B, H, K, head_dim]
+        v = bio_v.view(b, self.cfg.num_tokens, num_heads, head_dim).permute(0, 2, 1, 3)  # [B, H, K, head_dim]
 
-        # 3. Scaled Dot-Product Cross-Attention: cada frame de áudio atende às sub-bandas vocais
-        # scores: [B, H, T, num_voice]
+        # 3. Scaled Dot-Product Cross-Attention: cada frame atende aos K tokens do dicionário
+        # scores: [B, H, T, K]
         scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale
         attn = torch.softmax(scores, dim=-1)
         attn_dropped = self.dropout(attn)
@@ -177,8 +195,9 @@ class CausalSubbandCrossAttention(nn.Module):
         out_emb = query + delta_emb
 
         # 6. Modulação fina nas sub-bandas ERB de voz (300 Hz - 4000 Hz)
-        # Ganhos vocais delta limitados por tanh e gain_bound
+        # Ganhos vocais delta limitados por tanh, envelope de transição suave e gain_bound
         delta_voice = torch.tanh(self.subband_gain_head(ctx)) * (self.cfg.gain_bound * mask_t)  # [B, T, num_voice]
+        delta_voice = delta_voice * self.freq_envelope  # Aplica o envelope espectral
         voice_gains = (1.0 + delta_voice).unsqueeze(1)  # [B, 1, T, num_voice]
 
         # Montagem funcional do tensor completo de ganhos ERB (32 bandas) sem mutações in-place

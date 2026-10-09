@@ -30,8 +30,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from cctrain.data.enroll import EnrollmentAugmentConfig
 from cctrain.dfvendor import ensure_df_importable
-from cctrain.hashing import config_hash, sha256_file
-from cctrain.losses.dfnet import asymmetric_formant_loss, dfnet_loss, gate_loss, local_snr_loss
+from cctrain.hashing import sha256_file
+from cctrain.train.checkpoint import config_hash
+from cctrain.losses.dfnet import (
+    asymmetric_formant_loss,
+    df_coef_temporal_regularization_loss,
+    dfnet_loss,
+    gate_loss,
+    local_snr_loss,
+    target_absence_loss,
+)
 from cctrain.losses.distill import distill_loss
 from cctrain.m2.config import load_stage_f_config
 from cctrain.models.cross_attention import SubbandCrossAttentionConfig
@@ -39,31 +47,47 @@ from cctrain.models.dfnet3_upstream import load_upstream_dfnet3
 from cctrain.models.film import FilmConfig, FilmGenerator
 from cctrain.models.pdfnet3_pro import PDFNet3Pro
 from cctrain.paths import Paths
-from cctrain.train.checkpoints import (
+from cctrain.train.checkpoint import (
     Checkpoint,
-    bn_state_sha256,
     git_commit,
     load_checkpoint,
     load_latest,
-    n_batchnorm,
     save_checkpoint,
 )
-from cctrain.train.dataset import StageFDataset
 from cctrain.train.stage_f import (
     HOP,
+    StageFDataset,
     StageFHParams,
     _gated,
     _lr_factor,
     _lsnr_target,
     _to_device,
     _truncate_log,
+    bn_state_sha256,
     gpu_lock,
     gpu_logger,
-    load_bank,
-    load_inputs,
+    n_batchnorm,
     prepare_student,
     read_history,
 )
+from cctrain.train.embed_bank import ArrayEmbeddingBank
+from cctrain.m1 import pools
+from cctrain.train.stage_c import StageCData
+
+EMB = Paths.from_env().data / "embeddings"
+BANK_V2, BANK_V1 = EMB / "bank-m2-sbecapa-v2.npz", EMB / "bank-m1-sbecapa-v1.npz"
+
+def load_bank():
+    if BANK_V2.is_file():
+        bank = ArrayEmbeddingBank.load(BANK_V2)
+        if getattr(bank, "has_provenance", False):
+            return bank, "v2"
+    return ArrayEmbeddingBank.load(BANK_V1), "v1"
+
+def load_inputs(paths: Paths):
+    speech = pools.by_split(pools.speech_records(paths), "train")
+    noise_train, _ = pools.noise_pools()
+    return StageCData(speech, noise_train, pools.rir_records(), None)
 
 ensure_df_importable()
 from df.loss import Istft
@@ -84,16 +108,17 @@ def parse_args():
     p.add_argument("--workers", type=int, default=4, help="Número de workers no DataLoader")
     p.add_argument("--batch-size", type=int, default=16, help="Tamanho do lote")
     p.add_argument("--formant-weight", type=float, default=2.5, help="Peso da banda de formantes")
+    p.add_argument("--steps-per-epoch", type=int, default=None, help="Passos máximos por época (opcional)")
     p.add_argument("--device", default="cuda", help="Dispositivo (cuda ou cpu)")
     return p.parse_args()
 
 
 def stage_pro_step(model: nn.Module, teacher: nn.Module, istft: Istft, df_params: ModelParams,
                    hp: StageFHParams, b: dict, formant_weight: float) -> dict[str, torch.Tensor]:
-    """Forward + perdas do pDFNet3 Pro: Dual-Conditioning e Loss Assimétrica de Formantes."""
+    """Forward + perdas do pDFNet3 Pro: Dual-Conditioning, Formantes, Target-Absence e Regularização DF."""
     spec, spec_clean, mask = b["spec"], b["spec_clean"], b["mask"]
     nb = spec.shape[0]
-    spec_e, m, lsnr, _ = model(spec.clone(), b["feat_erb"], b["feat_spec"], b["embedding"], mask)
+    spec_e, m, lsnr, df_coefs = model(spec.clone(), b["feat_erb"], b["feat_spec"], b["embedding"], mask)
     out, _stages = _gated(model.base, spec, spec_e, m, lsnr)
     est, tgt = istft(out), istft(spec_clean)
     lsnr_t = _lsnr_target(df_params, spec_clean, spec)
@@ -112,7 +137,20 @@ def stage_pro_step(model: nn.Module, teacher: nn.Module, istft: Istft, df_params
     gate = gate_loss(lsnr, b["interferer_frames"] & (mask.reshape(nb, 1) > 0), factor=hp.lambda_gate)
     ls = local_snr_loss(lsnr, lsnr_t, b["lsnr_mask"])
 
-    # 4. Destilação de amostras desmascaradas contra professor
+    # 4. Target-Absence Loss: força energia zero durante ausência do falante alvo
+    absence_mask = b["interferer_frames"] & (mask.reshape(nb, 1) > 0)
+    if absence_mask.any():
+        l_abs = target_absence_loss(est, absence_mask)
+    else:
+        l_abs = torch.tensor(0.0, device=est.device)
+
+    # 5. DF Temporal Regularization Loss: penaliza variações caóticas de fase/coeficientes
+    if df_coefs is not None and df_coefs.numel() > 0:
+        l_df = df_coef_temporal_regularization_loss(df_coefs, time_dim=1) / (df_coefs.numel() / df_coefs.shape[1]) * 0.05
+    else:
+        l_df = torch.tensor(0.0, device=est.device)
+
+    # 6. Destilação de amostras desmascaradas contra professor
     idx = (mask.reshape(nb) == 0).nonzero(as_tuple=True)[0]
     if idx.numel():
         with torch.no_grad():
@@ -124,8 +162,18 @@ def stage_pro_step(model: nn.Module, teacher: nn.Module, istft: Istft, df_params
         t_est = est[:0]
     t = distill_loss(est, t_est, mask, b["max_freq"], lambda_t=hp.lambda_t, n_ffts=hp.fft_sizes, gamma=hp.loss_gamma)
 
-    return {"total": mr + os_ + gate + ls + t, "mr": mr, "os": os_, "gate": gate, "lsnr": ls, "t": t,
-            "n0": torch.tensor(float(idx.numel()))}
+    total = mr + os_ + gate + ls + t + 0.5 * l_abs + l_df
+    return {
+        "total": total,
+        "mr": mr,
+        "os": os_,
+        "gate": gate,
+        "lsnr": ls,
+        "abs": l_abs,
+        "df_reg": l_df,
+        "t": t,
+        "n0": torch.tensor(float(idx.numel())),
+    }
 
 
 def main():
@@ -164,15 +212,23 @@ def main():
         log(f"Carregando pesos de warm start: {args.init_ckpt}")
         init_sha = sha256_file(Path(args.init_ckpt))
         ckpt_data = load_checkpoint(Path(args.init_ckpt))
-        model.load_state_dict(ckpt_data.model, strict=False)
-        log("Warm start concluído: base e FiLM sincronizados; Cross-Attention inicializado com ganhos unitários")
+        curr_state = model.state_dict()
+        compat_state = {
+            k: v for k, v in ckpt_data.model.items()
+            if k in curr_state and v.shape == curr_state[k].shape
+        }
+        model.load_state_dict(compat_state, strict=False)
+        loaded_count = len(compat_state)
+        total_count = len(curr_state)
+        log(f"Warm start concluído: {loaded_count}/{total_count} tensores carregados (base, FiLM e decoders sincronizados)")
 
-    total_steps = args.epochs * hp.steps_per_epoch
+    steps_per_epoch = args.steps_per_epoch if args.steps_per_epoch is not None else hp.steps_per_epoch
+    total_steps = args.epochs * steps_per_epoch
     opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=args.lr, weight_decay=hp.weight_decay)
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: _lr_factor(s, hp.warmup_steps, total_steps))
 
     bank, _ = load_bank()
-    data = load_inputs()
+    data = load_inputs(paths)
     data_root = paths.data
 
     log_path = run_dir / "loss-log.jsonl"
@@ -193,6 +249,8 @@ def main():
                             prefetch_factor=hp.prefetch_factor if hp.num_workers else None)
             
             for batch_idx, batch in enumerate(dl):
+                if args.steps_per_epoch is not None and batch_idx >= args.steps_per_epoch:
+                    break
                 t0 = time.perf_counter()
                 b = _to_device(batch, device)
                 prepare_student(model)
@@ -212,7 +270,8 @@ def main():
                         "step": step, "epoch": epoch, "lr": float(sched.get_last_lr()[0]),
                         "total": float(parts["total"].item()), "mr": float(parts["mr"].item()),
                         "os": float(parts["os"].item()), "gate": float(parts["gate"].item()),
-                        "lsnr": float(parts["lsnr"].item()), "t": float(parts["t"].item()),
+                        "lsnr": float(parts["lsnr"].item()), "abs": float(parts["abs"].item()),
+                        "df_reg": float(parts["df_reg"].item()), "t": float(parts["t"].item()),
                         "n0": float(parts["n0"].item()), "dt": dt
                     }
                     loss_log.write(json.dumps(entry) + "\n")
