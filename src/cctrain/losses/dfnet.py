@@ -272,6 +272,74 @@ def target_absence_loss(pred: Tensor, absence_mask: Tensor) -> Tensor:
     return ((p_flat ** 2) * m_flat).sum() / denom
 
 
+class ArcFaceLoss(torch.nn.Module):
+    """Additive Angular Margin Loss (ArcFace) para desentrelaçamento de locutores em TSE.
+
+    Ref: Deng et al., 'ArcFace: Additive Angular Margin Loss for Deep Face Recognition', CVPR 2019.
+    Configuração calibrada: escala s = 32.0, margem m = 0.25 radianos (~14.3 graus).
+    """
+
+    def __init__(self, in_features: int, num_classes: int, s: float = 32.0, m: float = 0.25):
+        super().__init__()
+        import math
+        self.in_features = in_features
+        self.num_classes = num_classes
+        self.s = s
+        self.m = m
+        self.weight = torch.nn.Parameter(torch.empty(num_classes, in_features))
+        torch.nn.init.xavier_uniform_(self.weight)
+
+        self.cos_m = math.cos(m)
+        self.sin_m = math.sin(m)
+        self.th = math.cos(math.pi - m)
+        self.mm = math.sin(math.pi - m) * m
+
+    def forward(self, input: Tensor, label: Tensor) -> Tensor:
+        cosine = F.linear(F.normalize(input, dim=-1), F.normalize(self.weight, dim=-1))
+        sine = torch.sqrt((1.0 - torch.pow(cosine, 2)).clamp(0, 1))
+        phi = cosine * self.cos_m - sine * self.sin_m
+        phi = torch.where(cosine > self.th, phi, cosine - self.mm)
+
+        one_hot = torch.zeros(cosine.size(), device=input.device)
+        one_hot.scatter_(1, label.view(-1, 1).long(), 1)
+        output = (one_hot * phi) + ((1.0 - one_hot) * cosine)
+        output *= self.s
+        return F.cross_entropy(output, label)
+
+
+def arcface_angular_margin_loss(
+    emb_pred: Tensor,
+    emb_target: Tensor,
+    emb_interferer: Tensor | None = None,
+    s: float = 32.0,
+    m: float = 0.25,
+) -> Tensor:
+    """Perda de Margem Angular de Pares (ArcFace para trios de TSE).
+
+    Aplica margem angular m sobre a similaridade cosseno entre a predição e o alvo,
+    penalizando aproximação ao interferente com escala s.
+    """
+    import math
+    p = F.normalize(emb_pred, dim=-1)
+    t = F.normalize(emb_target, dim=-1)
+    cos_target = (p * t).sum(dim=-1).clamp(-1.0 + 1e-7, 1.0 - 1e-7)
+
+    cos_m = math.cos(m)
+    sin_m = math.sin(m)
+    sin_target = torch.sqrt((1.0 - cos_target ** 2).clamp_min(1e-7))
+    cos_target_m = cos_target * cos_m - sin_target * sin_m
+
+    if emb_interferer is not None:
+        i = F.normalize(emb_interferer, dim=-1)
+        cos_interferer = (p * i).sum(dim=-1).clamp(-1.0 + 1e-7, 1.0 - 1e-7)
+        logits = torch.stack([cos_target_m, cos_interferer], dim=-1) * s
+    else:
+        logits = torch.stack([cos_target_m, torch.zeros_like(cos_target_m)], dim=-1) * s
+
+    labels = torch.zeros(logits.shape[0], dtype=torch.long, device=logits.device)
+    return F.cross_entropy(logits, labels)
+
+
 def interferer_rejection_loss(pred_emb: Tensor, target_emb: Tensor, interferer_emb: Tensor, temperature: float = 0.1) -> Tensor:
     """Interferer Rejection Loss (InfoNCE contrastiva)."""
     pred_norm = F.normalize(pred_emb, dim=-1)
@@ -300,32 +368,35 @@ def stage_c_loss(pred: Tensor, target: Tensor, lsnr: Tensor, lsnr_target: Tensor
                  absence_mask: Tensor | None = None,
                  pred_emb: Tensor | None = None, target_emb: Tensor | None = None, interferer_emb: Tensor | None = None,
                  df_coefs: Tensor | None = None, df_coefs_time_dim: int = -2,
-                 lambda_abs: float = 0.5, lambda_conf: float = 0.1, lambda_df: float = 0.05,
+                 lambda_abs: float = 0.5, lambda_conf: float = 0.08, lambda_df: float = 0.05,
+                 lambda_arcface: float = 0.15,
                  **os_kwargs) -> dict[str, Tensor]:
-    """Perda do estágio C sem destilação: MR do DFNet3 + over-suppression + L_gate + LocalSnr (mascarada)."""
+    """Perda do estágio C sem destilação: MR do DFNet3 + over-suppression + L_gate + LocalSnr + ArcFace + InfoNCE."""
     mr = dfnet_loss(pred, target, max_freq)
     os_ = over_suppression_loss(pred, target, max_freq, use_formant_weights=use_formant_loss, **os_kwargs)
     gate = gate_loss(lsnr, interferer_frames)
     ls = local_snr_loss(lsnr, lsnr_target, lsnr_mask)
-    
+
     total = mr + os_ + gate + ls
     res = {"total": total, "mr": mr, "os": os_, "gate": gate, "lsnr": ls}
-    
+
     if absence_mask is not None:
         l_abs = target_absence_loss(pred, absence_mask)
         res["abs"] = l_abs
         res["total"] = res["total"] + lambda_abs * l_abs
-        
+
     if pred_emb is not None and target_emb is not None and interferer_emb is not None:
         l_conf = interferer_rejection_loss(pred_emb, target_emb, interferer_emb)
+        l_arcface = arcface_angular_margin_loss(pred_emb, target_emb, interferer_emb)
         res["conf"] = l_conf
-        res["total"] = res["total"] + lambda_conf * l_conf
-        
+        res["arcface"] = l_arcface
+        res["total"] = res["total"] + lambda_conf * l_conf + lambda_arcface * l_arcface
+
     if df_coefs is not None:
         l_df = df_coef_temporal_regularization_loss(df_coefs, time_dim=df_coefs_time_dim)
         res["df_reg"] = l_df
         res["total"] = res["total"] + lambda_df * l_df
-        
+
     return res
 
 

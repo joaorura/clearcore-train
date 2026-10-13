@@ -26,20 +26,20 @@ DEFAULT_TOTAL_ERB_BANDS: int = 32
 
 @dataclass(frozen=True)
 class SubbandCrossAttentionConfig:
-    """Configuração do bloco de Cross-Attention Causal em Sub-bandas."""
+    """Configuração do bloco de Cross-Attention Causal em Sub-bandas (DFNet-TSE-MHCA)."""
 
     query_dim: int = 512  # Dimensão dos embeddings temporais do encoder (emb)
     embedding_dim: int = 192  # Dimensão do embedding biométrico do locutor (ECAPA-TDNN)
-    proj_dim: int = 64  # Dimensão de projeção de baixa ordem para tempo real
-    num_heads: int = 4  # Número de cabeças de atenção (head_dim = proj_dim // num_heads = 16)
+    proj_dim: int = 128  # Dimensão de projeção de baixa ordem para tempo real (128 para Fase 2)
+    num_heads: int = 4  # Número de cabeças de atenção (head_dim = proj_dim // num_heads = 32)
     num_subbands: int = DEFAULT_TOTAL_ERB_BANDS  # Total de bandas ERB (32)
     voice_band_start: int = DEFAULT_VOICE_ERB_START  # Início da região vocal (300 Hz)
     voice_band_end: int = DEFAULT_VOICE_ERB_END  # Fim da região vocal (4000 Hz)
     gain_bound: float = 0.5  # Limite máximo de modulação fina de ganho em sub-bandas
     dropout: float = 0.0  # Dropout (0.0 para inferência determinística)
     zero_init: bool = True  # Inicialização com zero para identidade exata no início
-    num_tokens: int = 8  # Número de tokens no Speaker Memory Dictionary
-    token_dim: int = 64  # Dimensão de cada token
+    num_tokens: int = 16  # Número de tokens no Speaker Memory Dictionary (16 para Fase 2)
+    token_dim: int = 128  # Dimensão de cada token (128 para Fase 2)
 
     @property
     def num_voice_bands(self) -> int:
@@ -130,11 +130,34 @@ class CausalSubbandCrossAttention(nn.Module):
             nn.init.zeros_(self.subband_gain_head.weight)
             nn.init.zeros_(self.subband_gain_head.bias)
 
+    def precompute_kv(self, speaker_tokens: Tensor) -> tuple[Tensor, Tensor]:
+        """Pré-computa Keys e Values uma única vez (offline no enrollment para zero MACs no áudio).
+
+        Args:
+            speaker_tokens: Tensor de tokens de voz [B, K, token_dim] ou [K, token_dim]
+
+        Returns:
+            (k, v) com shape [B, num_heads, K, head_dim]
+        """
+        if speaker_tokens.ndim == 2:
+            speaker_tokens = speaker_tokens.unsqueeze(0)
+        b, k_tokens, _ = speaker_tokens.shape
+        num_heads = self.cfg.num_heads
+        head_dim = self.cfg.head_dim
+
+        bio_kv = self.bio_to_kv(speaker_tokens)  # [B, K, proj_dim * 2]
+        bio_k, bio_v = bio_kv.chunk(2, dim=-1)
+        k = bio_k.view(b, k_tokens, num_heads, head_dim).permute(0, 2, 1, 3)
+        v = bio_v.view(b, k_tokens, num_heads, head_dim).permute(0, 2, 1, 3)
+        return k, v
+
     def forward(
         self,
         query: Tensor,
-        embedding: Tensor,
+        embedding: Tensor | None = None,
         mask: Tensor | None = None,
+        speaker_tokens: Tensor | None = None,
+        precomputed_kv: tuple[Tensor, Tensor] | None = None,
     ) -> SubbandAttentionOutput:
         """Executa a Cross-Attention causal em sub-bandas.
 
@@ -142,6 +165,8 @@ class CausalSubbandCrossAttention(nn.Module):
             query: Embeddings temporais do encoder [B, T, query_dim]
             embedding: Vetor biométrico do locutor [B, embedding_dim] ou [B, 1, embedding_dim]
             mask: Máscara de condicionamento / perfil [B, 1] ou [B, 1, 1] (0.0=bypass, 1.0=ativo)
+            speaker_tokens: Opcional. Dicionário de tokens do locutor [B, K, token_dim]
+            precomputed_kv: Opcional. Tupla (k, v) pré-computada offline via precompute_kv()
 
         Returns:
             SubbandAttentionOutput com:
@@ -155,30 +180,38 @@ class CausalSubbandCrossAttention(nn.Module):
         head_dim = self.cfg.head_dim
         proj_dim = self.cfg.proj_dim
 
-        # Adequação de formato do embedding biométrico
-        if embedding.ndim == 3 and embedding.shape[1] == 1:
-            embedding = embedding.squeeze(1)
+        # 1. Projeção de Query temporal: causalidade estrita porque a projeção é pontual por frame
+        q = self.q_proj(query)  # [B, T, proj_dim]
+        q = q.view(b, t, num_heads, head_dim).transpose(1, 2)  # [B, H, T, head_dim]
 
-        if embedding.ndim == 2:
-            # Fallback para vetor único [B, E] -> projeção para K tokens
-            embedding = self.fallback_proj(embedding)
-            embedding = embedding.view(b, self.cfg.num_tokens, self.cfg.token_dim)
+        # 2. Obtenção de Key e Value (pré-computado ou projetado)
+        if precomputed_kv is not None:
+            k, v = precomputed_kv
+            k_tokens = k.shape[2]
+        else:
+            tokens_source = speaker_tokens if speaker_tokens is not None else embedding
+            if tokens_source is None:
+                tokens_source = torch.zeros(b, self.cfg.num_tokens, self.cfg.token_dim, device=query.device, dtype=query.dtype)
+
+            if tokens_source.ndim == 3 and tokens_source.shape[1] == 1 and tokens_source.shape[2] == self.cfg.embedding_dim:
+                tokens_source = tokens_source.squeeze(1)
+
+            if tokens_source.ndim == 2:
+                # Fallback para vetor único [B, E] -> projeção para K tokens
+                tokens_source = self.fallback_proj(tokens_source)
+                tokens_source = tokens_source.view(b, self.cfg.num_tokens, self.cfg.token_dim)
+
+            k_tokens = tokens_source.shape[1]
+            bio_kv = self.bio_to_kv(tokens_source)  # [B, K, proj_dim * 2]
+            bio_k, bio_v = bio_kv.chunk(2, dim=-1)
+            k = bio_k.view(b, k_tokens, num_heads, head_dim).permute(0, 2, 1, 3)  # [B, H, K, head_dim]
+            v = bio_v.view(b, k_tokens, num_heads, head_dim).permute(0, 2, 1, 3)  # [B, H, K, head_dim]
 
         # Máscara padrão (1.0 se não fornecida)
         if mask is None:
             mask_t = torch.ones(b, 1, 1, device=query.device, dtype=query.dtype)
         else:
             mask_t = mask.view(b, 1, 1)
-
-        # 1. Projeção de Query temporal: causalidade estrita porque a projeção é pontual por frame
-        q = self.q_proj(query)  # [B, T, proj_dim]
-        q = q.view(b, t, num_heads, head_dim).transpose(1, 2)  # [B, H, T, head_dim]
-
-        # 2. Projeção dos tokens da voz em Key e Value
-        bio_kv = self.bio_to_kv(embedding)  # [B, K, proj_dim * 2]
-        bio_k, bio_v = bio_kv.chunk(2, dim=-1)
-        k = bio_k.view(b, self.cfg.num_tokens, num_heads, head_dim).permute(0, 2, 1, 3)  # [B, H, K, head_dim]
-        v = bio_v.view(b, self.cfg.num_tokens, num_heads, head_dim).permute(0, 2, 1, 3)  # [B, H, K, head_dim]
 
         # 3. Scaled Dot-Product Cross-Attention: cada frame atende aos K tokens do dicionário
         # scores: [B, H, T, K]

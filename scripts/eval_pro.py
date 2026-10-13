@@ -40,7 +40,7 @@ def evaluate(ckpt_path: Path, device: str = "cuda"):
     cfg = load_stage_f_config()
     hp = StageFHParams.from_config(cfg)
     gen = FilmGenerator(FilmConfig(log_gamma_bound=hp.log_gamma_bound, beta_bound=hp.beta_bound)).to(device)
-    attn_cfg = SubbandCrossAttentionConfig(query_dim=512, embedding_dim=192, proj_dim=64, num_heads=4)
+    attn_cfg = SubbandCrossAttentionConfig(query_dim=512, embedding_dim=192, proj_dim=128, num_heads=4, num_tokens=16, token_dim=128)
     model = PDFNet3Pro(base, gen, cross_attention_config=attn_cfg, enable_cross_attention=True).to(device)
 
     print(f"Carregando checkpoint Pro: {ckpt_path}")

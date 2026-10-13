@@ -33,6 +33,7 @@ from cctrain.dfvendor import ensure_df_importable
 from cctrain.hashing import sha256_file
 from cctrain.train.checkpoint import config_hash
 from cctrain.losses.dfnet import (
+    arcface_angular_margin_loss,
     asymmetric_formant_loss,
     df_coef_temporal_regularization_loss,
     dfnet_loss,
@@ -162,7 +163,19 @@ def stage_pro_step(model: nn.Module, teacher: nn.Module, istft: Istft, df_params
         t_est = est[:0]
     t = distill_loss(est, t_est, mask, b["max_freq"], lambda_t=hp.lambda_t, n_ffts=hp.fft_sizes, gamma=hp.loss_gamma)
 
-    total = mr + os_ + gate + ls + t + 0.5 * l_abs + l_df
+    # 7. ArcFace Angular Margin Loss: desentrelaçamento angular de locutores
+    if "interferer_embedding" in b and b["interferer_embedding"] is not None:
+        l_arc = arcface_angular_margin_loss(
+            b["embedding"],
+            b["embedding"],
+            b["interferer_embedding"],
+            s=32.0,
+            m=0.25,
+        )
+    else:
+        l_arc = torch.tensor(0.0, device=est.device)
+
+    total = mr + os_ + gate + ls + t + 0.5 * l_abs + l_df + 0.15 * l_arc
     return {
         "total": total,
         "mr": mr,
@@ -171,6 +184,7 @@ def stage_pro_step(model: nn.Module, teacher: nn.Module, istft: Istft, df_params
         "lsnr": ls,
         "abs": l_abs,
         "df_reg": l_df,
+        "arcface": l_arc,
         "t": t,
         "n0": torch.tensor(float(idx.numel())),
     }
@@ -199,7 +213,7 @@ def main():
     cfg = load_stage_f_config()
     hp = StageFHParams.from_config(cfg, run_id=args.run_id, num_workers=args.workers, batch_size=args.batch_size)
     gen = FilmGenerator(FilmConfig(log_gamma_bound=hp.log_gamma_bound, beta_bound=hp.beta_bound)).to(device)
-    attn_cfg = SubbandCrossAttentionConfig(query_dim=512, embedding_dim=192, proj_dim=64, num_heads=4)
+    attn_cfg = SubbandCrossAttentionConfig(query_dim=512, embedding_dim=192, proj_dim=128, num_heads=4, num_tokens=16, token_dim=128)
     model = PDFNet3Pro(base, gen, cross_attention_config=attn_cfg, enable_cross_attention=True).to(device)
     prepare_student(model)
 
