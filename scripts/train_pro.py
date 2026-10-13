@@ -25,6 +25,7 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
+import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
@@ -267,6 +268,19 @@ def main():
                     break
                 t0 = time.perf_counter()
                 b = _to_device(batch, device)
+                if "interferer_key" in batch:
+                    rng_step = np.random.default_rng(hp.seed + step)
+                    int_embs = []
+                    has_any = False
+                    for k in batch["interferer_key"]:
+                        if k and k in bank.speakers():
+                            int_embs.append(bank.sample(k, rng_step))
+                            has_any = True
+                        else:
+                            int_embs.append(np.zeros(192, dtype=np.float32))
+                    if has_any:
+                        b["interferer_embedding"] = torch.from_numpy(np.stack(int_embs)).to(device)
+
                 prepare_student(model)
                 opt.zero_grad(set_to_none=True)
 
@@ -285,7 +299,9 @@ def main():
                         "total": float(parts["total"].item()), "mr": float(parts["mr"].item()),
                         "os": float(parts["os"].item()), "gate": float(parts["gate"].item()),
                         "lsnr": float(parts["lsnr"].item()), "abs": float(parts["abs"].item()),
-                        "df_reg": float(parts["df_reg"].item()), "t": float(parts["t"].item()),
+                        "df_reg": float(parts["df_reg"].item()),
+                        "arcface": float(parts["arcface"].item()),
+                        "t": float(parts["t"].item()),
                         "n0": float(parts["n0"].item()), "dt": dt
                     }
                     loss_log.write(json.dumps(entry) + "\n")
@@ -294,7 +310,7 @@ def main():
                 if step % 500 == 0 or (time.monotonic() - last_ckpt_time) > 1800:
                     ckpt_p = save_checkpoint(
                         ckpt_dir, step=step, model=model.state_dict(), optimizer=opt, scheduler=sched,
-                        keep=3, sampler_state={"epoch": epoch, "batch": batch_idx},
+                        keep=10, sampler_state={"epoch": epoch, "batch": batch_idx},
                         cfg_hash=chash, commit=commit,
                         extra={"elapsed_s": time.monotonic() - t_start, "init_sha256": init_sha}
                     )
@@ -304,7 +320,7 @@ def main():
             # Salva fim de época
             ep_ckpt = save_checkpoint(
                 ckpt_dir, step=step, model=model.state_dict(), optimizer=opt, scheduler=sched,
-                keep=5, sampler_state={"epoch": epoch, "batch": 0},
+                keep=10, sampler_state={"epoch": epoch, "batch": 0},
                 cfg_hash=chash, commit=commit,
                 extra={"elapsed_s": time.monotonic() - t_start, "epoch": epoch, "init_sha256": init_sha}
             )
