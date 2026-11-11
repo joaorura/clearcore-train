@@ -103,6 +103,9 @@ def parse_args():
     p.add_argument("--grad-probe", type=int, default=0, help="nos N primeiros passos mede a norma do gradiente por termo")
     p.add_argument("--runs-subdir", default="m4")
     p.add_argument("--device", default="cuda")
+    p.add_argument("--soft-gate-tau", type=float, default=0.0, help="diagnóstico: ZERO contínuo (dB) com perfil")
+    p.add_argument("--data-offset-step", type=int, default=0, help="diagnóstico: começa a sequência de dados neste passo")
+    p.add_argument("--const-lr", type=float, default=0.0, help="diagnóstico: LR constante (sem cosseno/aquecimento)")
     return p.parse_args()
 
 
@@ -125,8 +128,11 @@ def lr_factor(step: int, warmup: int, total: int) -> float:
 # --- gating e perdas ------------------------------------------------------------------------------------------------
 
 
-def gate_v4(spec, spec_m, spec_e, lsnr, profile: torch.Tensor):
-    """Gating por amostra (§3.3): perfil -> ZERO se lsnr < −10, senão ERB+DF; sem perfil -> (−10, 30, 20)."""
+def gate_v4(spec, spec_m, spec_e, lsnr, profile: torch.Tensor, soft_tau: float = 0.0):
+    """Gating por amostra (§3.3): perfil -> ZERO se lsnr < −10, senão ERB+DF; sem perfil -> (−10, 30, 20).
+
+    `soft_tau` > 0 (diagnóstico): nas amostras com perfil o ZERO vira o ganho contínuo 1 − σ((−10 − lsnr)/τ), sem
+    detach, para que L_mr/L_leak/L_guard cheguem ao lsnr. `zero` (estatística) continua sendo a decisão dura."""
     level = lsnr.detach().reshape(spec.shape[0], -1)
     prof = profile.reshape(-1, 1).bool()
     zero = level < -10.0
@@ -137,6 +143,9 @@ def gate_v4(spec, spec_m, spec_e, lsnr, profile: torch.Tensor):
         return m[:, None, :, None, None]
 
     out = torch.where(w(zero), torch.zeros_like(spec_e), spec_e)
+    if soft_tau > 0:
+        g = 1.0 - torch.sigmoid((-10.0 - lsnr.reshape(spec.shape[0], -1)) / soft_tau)
+        out = torch.where(w(prof.expand_as(zero)), spec_e * w(g), out)
     out = torch.where(w(erb_only), spec_m, out)
     out = torch.where(w(none), spec, out)
     return out, zero
@@ -188,7 +197,7 @@ def step_v4(model, teacher, istft, df_params, hp: StageFHParams, b: dict, a) -> 
     profile = mask.reshape(nb) > 0
     spec_e, m, lsnr, df_coefs = model(spec.clone(), b["feat_erb"], b["feat_spec"], b["embedding"], mask)
     spec_m = model.base.mask(spec.clone(), m)
-    out, zero = gate_v4(spec, spec_m, spec_e, lsnr, profile)
+    out, zero = gate_v4(spec, spec_m, spec_e, lsnr, profile, soft_tau=getattr(a, "soft_gate_tau", 0.0))
     est, tgt = istft(out), istft(spec_clean)
     lsnr_t = _lsnr_target(df_params, spec_clean, spec)
     kw = dict(n_ffts=hp.fft_sizes, gamma=hp.loss_gamma)
@@ -311,10 +320,17 @@ def main():
     hashed = {"v4": vp.hashable(), "lr": a.lr, "warmup": a.warmup, "total_steps": a.total_steps,
               "batch": a.batch_size, "lambdas": [a.lambda_leak, a.lambda_ovl, a.lambda_guard, a.lambda_zero,
                                                  a.lambda_keep, a.lsnr_factor], "fw": a.formant_weight}
+    if a.soft_gate_tau or a.data_offset_step or a.const_lr:
+        hashed["diag"] = [a.soft_gate_tau, a.data_offset_step, a.const_lr]
     chash = config_hash(hashed)
     trainable = [p for p in model.parameters() if p.requires_grad]
     opt = torch.optim.AdamW(trainable, lr=a.lr, weight_decay=hp.weight_decay)
-    sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: lr_factor(s, a.warmup, a.total_steps))
+    if a.const_lr > 0:
+        for g in opt.param_groups:
+            g["lr"] = a.const_lr
+        sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: 1.0)
+    else:
+        sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: lr_factor(s, a.warmup, a.total_steps))
 
     log_path = run_dir / "loss-log.jsonl"
     existing = load_latest(ckpt_dir, expected_cfg_hash=chash)
@@ -354,7 +370,7 @@ def main():
     (run_dir / "pools-stats.json").write_text(json.dumps({**pl.stats, "heldout_enroll": list(pl.heldout_enroll)},
                                                          indent=1))
     ds = StageV4Dataset(pl, bank, paths.data, vp)
-    sampler = list(range(step * a.batch_size, len(ds)))
+    sampler = list(range((step + a.data_offset_step) * a.batch_size, len(ds)))
     dl = DataLoader(ds, batch_size=a.batch_size, sampler=sampler, num_workers=a.workers,
                     prefetch_factor=a.prefetch if a.workers else None, persistent_workers=False)
 
