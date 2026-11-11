@@ -390,9 +390,11 @@ parada dura por relógio às 07:15 (janela de GPU até 08:30, 1 h 15 de avaliaç
   λ_guard 1,6, λ_zero 3,3e-3 → 1,3e-2, λ_k 0,11; `L_lsnr` 1e-3 como no plano. No primeiro lançamento (λ_zero 3,3e-3)
   o `L_keep` derrubou os quadros do alvo zerados (23% → 3%) mas também o ZERO no só-interferente (58% → 30%), com
   `L_zero` a 3,3%: o run foi reiniciado com λ_zero dobrado (`runs/m4/pro-v4-aborted-lzero`).
-- Held-out: `joao_messias_take4_*` (24 arquivos) fora do treino em qualquer papel; os 443 segmentos de ruído
-  `mic_obs_3mic_combo_20261008_143002_*` (gravação `2026-10-08 14-30-02.mp4`) fora do pool de ruído. O falante
-  `joao_messias` não está no banco de enrollment, então só aparece como interferente (takes 1–3).
+- Held-out: `joao_messias_take3_*` e `joao_messias_take4_*` (48 arquivos; mesma fala gravada ao mesmo tempo em dois
+  canais, 08-32-48 e 08-32-51) fora do treino em qualquer papel; ficam 148 arquivos (take1 + take2). O falante
+  `joao_messias` não está no banco de enrollment, então só aparece como interferente. A gravação
+  `2026-10-08 14-30-02.mp4` é ruído de escritório (não é fala do usuário) e continua no pool de ruído. A correção do
+  take3 entrou com o run já em curso: parado no passo 898 por SIGTERM e retomado do checkpoint (mesmo cosseno).
 - Desvios: RIR v3 multi-fonte não gerada (cada falante recebe uma RIR independente do pool v2); negativos difíceis
   só entre os 972 falantes do banco (centróide), sem o critério de mesmo sexo; banco de alvos não estendido (+625);
   interferentes extras = 1.511 falantes novos do CV-full (≤20 clipes cada), sem os clipes extras dos 603; o gating
