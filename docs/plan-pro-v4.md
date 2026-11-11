@@ -376,3 +376,24 @@ regride. O que falhar vira o escopo do v5.
 - (Opcional) Gravar um conjunto real curto (a voz dele + outra pessoa, num cômodo silencioso e num ruidoso, com
   enrollment separado) como verificação qualitativa final. A voz do dono está no treino (0,2 h), então ela não
   serve como métrica de generalização.
+
+## 11. Execução do run longo (2026-11-10, `train/pro-v4`)
+
+Run `runs/m4/pro-v4` (`scripts/train_pro_v4.py`, `src/cctrain/data/mix_v4.py`), partida do v3 2000 (155/155 tensores),
+parada dura por relógio às 07:15 (janela de GPU até 08:30, 1 h 15 de avaliação), checkpoint a cada 15 min e no SIGTERM.
+
+- Orçamento real: ~9 h de GPU numa noite → **85.500 passos** num único cosseno (aquecimento de 1.000, pico 6e-5),
+  medido 0,373 s/passo (lote 16 × 4 s, 6 workers, espera do loader ~9 ms, VRAM 5,7 GB, PSS ~4,6 GiB). Fases por
+  fração do cosseno: fase 1 nos primeiros 15% (N≤2, SIR −10..+20, 20% negativos difíceis), fase 3 nos últimos 15%
+  (50% negativos difíceis, silencioso 30%). Sem braço B nem C.
+- Calibração (80 passos sem atualizar, a partir do v3; alvo ~10% de `L_mr` na mediana): λ_leak 2,0, λ_ovl 14,
+  λ_guard 1,6, λ_zero 3,3e-3 → 1,3e-2, λ_k 0,11; `L_lsnr` 1e-3 como no plano. No primeiro lançamento (λ_zero 3,3e-3)
+  o `L_keep` derrubou os quadros do alvo zerados (23% → 3%) mas também o ZERO no só-interferente (58% → 30%), com
+  `L_zero` a 3,3%: o run foi reiniciado com λ_zero dobrado (`runs/m4/pro-v4-aborted-lzero`).
+- Held-out: `joao_messias_take4_*` (24 arquivos) fora do treino em qualquer papel; os 443 segmentos de ruído
+  `mic_obs_3mic_combo_20261008_143002_*` (gravação `2026-10-08 14-30-02.mp4`) fora do pool de ruído. O falante
+  `joao_messias` não está no banco de enrollment, então só aparece como interferente (takes 1–3).
+- Desvios: RIR v3 multi-fonte não gerada (cada falante recebe uma RIR independente do pool v2); negativos difíceis
+  só entre os 972 falantes do banco (centróide), sem o critério de mesmo sexo; banco de alvos não estendido (+625);
+  interferentes extras = 1.511 falantes novos do CV-full (≤20 clipes cada), sem os clipes extras dos 603; o gating
+  por amostra está em `train_pro_v4.gate_v4` (o `runtime_path.py` da avaliação não foi alterado).
