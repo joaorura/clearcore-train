@@ -17,8 +17,9 @@ from cctrain.data.mix_v4 import (
 
 def test_heldout_patterns():
     assert is_heldout_speech("raw/speech-joao-messias/joao_messias_take4_0003.wav")
-    assert not is_heldout_speech("raw/speech-joao-messias/joao_messias_take3_0003.wav")
-    assert is_heldout_noise("raw/noise-local-mics/wavs/mic_obs_3mic_combo_20261008_143002_seg0001_raw.wav")
+    assert is_heldout_speech("raw/speech-joao-messias/joao_messias_take3_0003.wav")
+    assert not is_heldout_speech("raw/speech-joao-messias/joao_messias_take2_0003.wav")
+    assert not is_heldout_noise("raw/noise-local-mics/wavs/mic_obs_3mic_combo_20261008_143002_seg0001_raw.wav")
     assert not is_heldout_noise("raw/noise-local-mics/wavs/mic_builtin_20261006_105855_seg0001_raw.wav")
 
 

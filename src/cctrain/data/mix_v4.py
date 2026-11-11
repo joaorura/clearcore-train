@@ -49,8 +49,9 @@ SILENCE_MS = 1e-7
 MAX_REDRAWS = 8
 
 # Held-out (teste do usuário): fora do treino em qualquer papel (alvo, interferente, enrollment, ruído).
-HELDOUT_SPEECH_SUBSTR = ("speech-joao-messias/joao_messias_take4_",)
-HELDOUT_NOISE_SUBSTR = ("20261008_143002",)  # segmentos de /home/joaorura/2026-10-08 14-30-02.mp4
+HELDOUT_SPEECH_SUBSTR = ("speech-joao-messias/joao_messias_take3_", "speech-joao-messias/joao_messias_take4_")
+# take3 e take4 são a mesma fala gravada ao mesmo tempo em dois canais (08-32-48 / 08-32-51): ambos ficam fora.
+HELDOUT_NOISE_SUBSTR: tuple[str, ...] = ()  # a gravação de 2026-10-08 é ruído de escritório, não fala do usuário
 
 
 def is_heldout_speech(path: str) -> bool:
@@ -302,7 +303,8 @@ def build_pools(speech_train: Sequence[FileRecord], noise: Sequence[FileRecord],
         noise_l.append((r.path, int(r.sr), float(r.band_hz) if r.band_hz else NYQUIST_HZ))
     stats = {"targets": len(targets), "train_speakers": len(base_keys), "cv_extra_speakers": n_extra,
              "interferer_speakers": len(recs), "noise": len(noise_l), "rirs": len(rirs),
-             "heldout_speech_files": n_heldout_speech, "heldout_noise_files": n_heldout_noise,
+             "heldout_speech_files": n_heldout_speech,
+             "joao_messias_train_files": len(recs.get("speech-joao-messias:joao_messias", [])), "heldout_noise_files": n_heldout_noise,
              "target_tiers": {t: len(v) for t, v in target_tiers.items()},
              "neighbor_cos_median": float(np.median(np.take_along_axis(sim, nn_idx[:, :1], 1)))}
     return V4Pools(target_tiers=target_tiers, recs=dict(recs), rec_tier=rec_tier, interf_keys=sorted(recs),
