@@ -27,7 +27,7 @@ Sem perfil (`speaker_present`=0) a saída existe, mas não é usada.
 
 ```json
 "gating": {"mode": "presence", "output": "p_target", "graph": "enc",
-           "tau_on": 0.3, "tau_off": 0.3, "hangover_frames": 8,
+           "tau_on": 0.3, "tau_off": 0.1, "hangover_frames": 12,
            "applies_when": "speaker_present == 1",
            "no_profile": {"mode": "lsnr", "min_db": -10.0, "max_db_erb": 30.0, "max_db_df": 20.0}}
 ```
@@ -46,7 +46,7 @@ grafos continuam rodando em todo quadro ativo (decisão de 2026-11-09): o gating
 `gating.mode == "presence"` mantém o comportamento do v3.
 
 Os valores de τ/hangover do asset de teste saíram da varredura em dev do micro fine-tune (500 passos), com a meta
-"% ZERO no alvo ≤ 2%": são provisórios e serão recalculados no checkpoint final do treino longo (o runtime deve
+"% ZERO no alvo ≤ 2%" (não atingida na grade: o melhor ponto deu 3,1% no alvo / 26% no só-interferente): são provisórios e serão recalculados no checkpoint final do treino longo (o runtime deve
 ler do manifest, nunca fixar no código).
 
 ## Rótulo e treino da presença (para referência)
@@ -59,7 +59,7 @@ mesma máquina de estados (`scripts/train_pro_v4_presence.py`).
 ## Asset de teste
 
 `pdfnet3-pro-v4-presence-stateful-asset-v1.tar.gz` (tar determinístico, reprodutível), a partir de
-`runs/m4/v4-presence-smoke/checkpoints/ckpt-00000500.pt` (micro fine-tune de 500 passos do v3.1: **não é um modelo
+`runs/m4/v4-presence-smoke-c/checkpoints/ckpt-00000500.pt` (micro fine-tune de 500 passos do v3.1: **não é um modelo
 de produção**, serve para integrar o runtime). Membros: `enc.onnx`, `erb_dec.onnx`, `df_dec.onnx`, `config.ini`,
 `manifest.json` (com `gating` e `presence`).
 
@@ -68,4 +68,5 @@ de produção**, serve para integrar o runtime). Membros: `enc.onnx`, `erb_dec.o
 `scripts/gate_pro_v4_parity.py` (adaptado do v3): forward PyTorch x grafos hop a hop em ONNX Runtime, OpenVINO CPU e
 tract 0.19.16 (`tools/tract-check stream`, que agora grava `p_target`), perfis sem perfil / alvo / outro locutor;
 SNR de `m`, `coefs`, `lsnr`, `p_target` e do áudio com a seleção de estágio pelo gating de presença do manifest.
-Meta ≥ 100 dB em fp32. Asset de teste: **PASS**, mínimo 116,2 dB (OpenVINO, `m`), 0 divergências de estágio.
+Meta ≥ 100 dB em fp32. Asset de teste (sha256 `367165f8…2c92`): **PASS**, mínimo 116,3 dB entre ORT, OpenVINO CPU e tract, 0 divergências de
+estágio no áudio.

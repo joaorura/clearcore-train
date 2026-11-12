@@ -110,14 +110,14 @@ def parse_args(argv=None):
     p.add_argument("--lambda-guard", type=float, default=4.0)
     p.add_argument("--lsnr-factor", type=float, default=1e-3)
     p.add_argument("--bce-n0-mult", type=float, default=1.0, help="peso extra da BCE nos quadros do alvo com N=0")
-    p.add_argument("--bce-trunk-scale", type=float, default=20.0,
-                   help="escala do gradiente da cabeça para o tronco (BCE ~5%% da norma do gradiente do tronco)")
+    p.add_argument("--bce-trunk-scale", type=float, default=5.0,
+                   help="escala do gradiente da cabeça para o tronco (5: BCE ~1/3 da norma do tronco após 500 passos; 20 passou de 30%%)")
     p.add_argument("--guard-margin", type=float, default=0.5, help="dB")
     p.add_argument("--tau-on", type=float, default=0.5)
     p.add_argument("--tau-off", type=float, default=0.35)
     p.add_argument("--hangover", type=int, default=5, help="quadros de 10 ms")
     p.add_argument("--st-temp", type=float, default=1.0, help="temperatura da sigmoide substituta (logit)")
-    p.add_argument("--st-scale", type=float, default=1.0,
+    p.add_argument("--st-scale", type=float, default=0.05,
                    help="escala do gradiente straight-through (L_mr/L_os/L_leak/L_ovl -> decisão)")
     p.add_argument("--stop-at", default=None)
     p.add_argument("--ckpt-every-min", type=float, default=15.0)

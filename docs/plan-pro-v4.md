@@ -399,3 +399,23 @@ parada dura por relógio às 07:15 (janela de GPU até 08:30, 1 h 15 de avaliaç
   só entre os 972 falantes do banco (centróide), sem o critério de mesmo sexo; banco de alvos não estendido (+625);
   interferentes extras = 1.511 falantes novos do CV-full (≤20 clipes cada), sem os clipes extras dos 603; o gating
   por amostra está em `train_pro_v4.gate_v4` (o `runtime_path.py` da avaliação não foi alterado).
+
+## 12. v4-presence (2026-11-12, `train/pro-v4-presence`): validação curta, treino longo NÃO lançado
+
+`scripts/train_pro_v4_presence.py`: cabeça `p_target` (`PresenceHead`, GRU 32 sobre `emb_conditioned`, dentro do
+`enc`; +60.448 MACs/hop), gating com perfil por presença (histerese + hangover, straight-through), sem L_zero/L_keep,
+L_lsnr só sem perfil, L_guard contra o v3.1 congelado (mask=0), P(N=0)=0,35. Micro fine-tunes de 500 passos a partir
+do v3.1 (`runs/m4/v4-presence-smoke{,-b,-c}`), avaliação em dev (`scripts/eval_presence.py`, 304 receitas do
+`data/eval-v4`, 520 vistas):
+
+| run | st-scale / trunk-scale | AUC alvo×só-interf (v3.1 lsnr 0,799) | acc. bal. (v3.1 0,635) | %ZERO alvo / só-interf no τ escolhido (v3.1: 5,1 / 32,2) |
+|---|---|---|---|---|
+| A | 1,0 / 20 | 0,806 | 0,619 | 1,4 / 14,9 (τ 0,3/0,3, H 8) |
+| B | 0,25 / 5 | 0,810 | 0,687 | 2,4 / 21,4 (τ 0,3/0,1, H 12) |
+| C | 0,05 / 5 | 0,812 | 0,696 | 3,1 / 26,2 (τ 0,3/0,1, H 12); a 5,2% no alvo: 36,0% |
+
+Gradiente: em A o L_mr via straight-through domina a cabeça contra a BCE (cosseno −0,97, `bce|total` na cabeça −0,24);
+em C a BCE comanda a cabeça (`bce|total` 0,85) e nenhum par ~−1 domina o tronco (pior `os|leak` −0,77, já −0,80 no
+v3.1). Em C o `ovl` tem a maior norma no tronco (63 contra 34 do `mr`): reduzir λ_ovl para ~10 no treino longo.
+Tendência em 500 passos: pequena (≈ +4 pontos de %ZERO no só-interferente a %ZERO no alvo igual ao v3.1); metas
+(≥90% / ≤2%) longe. s/passo 0,41–0,43 → ~75k passos em 9 h, ~115k em 14 h.
