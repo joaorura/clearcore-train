@@ -13,6 +13,11 @@ variante) saem de `tse_eval.item_metrics`; o subcomando `report` agrega (somando
 com a vista sem perfil do mesmo modelo e confere as três metas.
 
 Uso: python scripts/eval_soft_gate.py run --out <dir> [--workers 3]; python scripts/eval_soft_gate.py report --out <dir>
+
+`--model KEY=CKPT:ARCH:GATING` (repetível, pro-v4-keep): troca o conjunto de modelos; cada um vira uma variante
+`KEY_GATING` com o gating por lsnr de `GATINGS` (`current` ou `new`), ex.: `--model v2=...:v2:current
+--model v31=...:v4:new --model keep=...:v4:new` -> v2_current, v31_new, keep_new. A lista fica em `meta.json` e o
+`report` a relê de lá.
 """
 
 from __future__ import annotations
@@ -57,8 +62,21 @@ def latency_ms(name: str, g) -> float:
     return LATENCY_MODEL_MS + (g.lookahead_ms if g.kind == "soft" else g.window_ms if g.kind == "window" else 0.0)
 
 
+def parse_models(specs: list[str]) -> dict[str, tuple[str, str, str]]:
+    """`KEY=CKPT:ARCH:GATING` -> {KEY: (CKPT, ARCH, GATING)}."""
+    out = {}
+    for sp in specs:
+        key, rest = sp.split("=", 1)
+        ck, arch, gating = rest.rsplit(":", 2)
+        out[key] = (ck, arch, gating)
+    return out
+
+
 def variants() -> dict[str, tuple[str, object]]:
     from cctrain.eval.tse_eval import Gating
+
+    if _MODE.get("models"):
+        return {f"{k}_{g}": (k, Gating.of(g)) for k, (_c, _a, g) in _MODE["models"].items()}
 
     if _MODE["set"] == "la":
         fl, rel = _MODE["floor"], _MODE["release"]
@@ -108,7 +126,8 @@ def _init(threads: int, mode: dict) -> None:
     tm.set_roots(PATHS.data, SET_DIR / "user_take4_stream_48k.wav")
     _W["bank"] = tm.Bank.from_json(json.loads((SET_DIR / "bank.json").read_text()), np.load(SET_DIR / "bank_emb.npy"))
     _W["user_emb"] = np.load(SET_DIR / "user_emb.npy")
-    _W["runners"] = {k: te.Runner(ck, arch, "new", "cpu") for k, (ck, arch) in MODELS.items()}
+    models = {k: (Path(c), a) for k, (c, a, _g) in mode["models"].items()} if mode.get("models") else MODELS
+    _W["runners"] = {k: te.Runner(ck, arch, "new", "cpu") for k, (ck, arch) in models.items()}
     _W["te"] = te
     _W["var"] = variants()
 
@@ -148,7 +167,7 @@ def _work(chunk: list[dict]) -> list[dict]:
 def cmd_run(a) -> None:
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
-    _MODE.update(set=a.set, floor=a.floor, release=a.release)
+    _MODE.update(set=a.set, floor=a.floor, release=a.release, models=parse_models(a.model) if a.model else None)
     recs = select(tm.read_recipes(SET_DIR / "recipes.jsonl"))
     if a.limit:
         recs = recs[: a.limit]
@@ -158,7 +177,9 @@ def cmd_run(a) -> None:
         done = {json.loads(line)["id"] for line in rows_path.read_text().splitlines() if line.strip()}
     todo = [r for r in recs if r["id"] not in done]
     print(f"{len(recs)} itens, {len(todo)} pendentes, {a.workers} processos x {a.threads} thread(s)", flush=True)
-    meta = {"models": {k: [str(v[0]), v[1]] for k, v in MODELS.items()}, "variants": list(variants()),
+    models = {k: [c, ar, g] for k, (c, ar, g) in _MODE["models"].items()} if _MODE["models"] else \
+        {k: [str(v[0]), v[1]] for k, v in MODELS.items()}
+    meta = {"models": models, "custom_models": bool(_MODE["models"]), "variants": list(variants()),
             "recipes_sha256": tm.recipes_digest(SET_DIR / "recipes.jsonl"), "items": len(recs), "attack_ms": ATTACK_MS,
             "hard": {"tau_on": 0.3, "tau_off": 0.1, "hangover": 12}, "started": time.strftime("%F %T")}
     (out / ("meta.json" if a.set == "main" else f"meta-{a.set}.json")).write_text(json.dumps(meta, indent=1))
@@ -323,20 +344,27 @@ def build_report(out: Path) -> str:
     var = variants()
     names = [n for n in var if any(r["variant"] == n for r in rows)]
     model_of = {n: m for n, (m, _) in var.items()}
-    L = ["# Gating suave por presença: avaliação sem treino", "",
-         f"- linhas: {len(rows)}; itens: {len({r['id'] for r in rows})}; ckpt C = `{MODELS['C'][0]}` (500 passos, smoke c); "
-         f"v3.1 = `{MODELS['v31'][0]}`; v2 = `{MODELS['v2'][0]}`",
-         f"- gating soft: ataque {ATTACK_MS:.0f} ms, liberação 150/300 ms (polo único), piso em dB no nome (`f10` = -10 dB); "
-         "`C_open` = ERB+DF sempre, sem ganho (piso 0 dB); `C_hard` = presença 0,3/0,1/12 (ZERO duro)", ""]
+    if _MODE.get("models"):
+        L = ["# Avaliação TSE (gating por lsnr, caminho do runtime)", "",
+             f"- linhas: {len(rows)}; itens: {len({r['id'] for r in rows})}"] + \
+            [f"- `{k}_{g}`: `{c}` (arch {ar}, gating {g})" for k, (c, ar, g) in _MODE["models"].items()] + [""]
+    else:
+        L = ["# Gating suave por presença: avaliação sem treino", "",
+             f"- linhas: {len(rows)}; itens: {len({r['id'] for r in rows})}; ckpt C = `{MODELS['C'][0]}` (500 passos, smoke c); "
+             f"v3.1 = `{MODELS['v31'][0]}`; v2 = `{MODELS['v2'][0]}`",
+             f"- gating soft: ataque {ATTACK_MS:.0f} ms, liberação 150/300 ms (polo único), piso em dB no nome (`f10` = -10 dB); "
+             "`C_open` = ERB+DF sempre, sem ganho (piso 0 dB); `C_hard` = presença 0,3/0,1/12 (ZERO duro)", ""]
     groups = [("Matriz N=1..4, SIR 0, -30 dBFS, silencioso", dict(axis="matrix", n=(1, 2, 3, 4), noise="silent")),
               ("Matriz N=1..4, SIR 0, -30 dBFS, SNR 5", dict(axis="matrix", n=(1, 2, 3, 4), noise="snr5")),
+              ("Matriz N=1, SIR 0, -30 dBFS, silencioso", dict(axis="matrix", n=1, noise="silent")),
+              ("Matriz N=1, SIR 0, -30 dBFS, SNR 5", dict(axis="matrix", n=1, noise="snr5")),
               ("Usuário real (take4) N=1..4, SIR 0, silencioso", dict(axis="user", n=(1, 2, 3, 4), noise="silent")),
               ("Usuário real (take4) N=1..4, SIR 0, SNR 5", dict(axis="user", n=(1, 2, 3, 4), noise="snr5")),
               ("Usuário real N=1, SIR 0, silencioso", dict(axis="user", n=1, noise="silent")),
               ("Usuário real N=1, SIR 0, SNR 5", dict(axis="user", n=1, noise="snr5"))]
     hdr = ("| variante | ΔSI-SDR | ΔSTOI | ΔESTOI | ganho alvo | ganho alvo (fortes) | supressão | supr. sobrep. | **dif** | "
            "**dif_f** | só-int att (int) | ≥10 | ≥20 | só-int att (mix) | seg só-int ≥15 (int) | seg só-int ≥15 (mix) | "
-           "seg alvo >3 |\n|---|" + "---|" * 16)
+           "seg alvo >3 | início: ganho | início >3 (%) |\n|---|" + "---|" * 18)
     for title, sel in groups:
         L += [f"## {title}", "", hdr]
         for n in names:
@@ -345,7 +373,8 @@ def build_report(out: Path) -> str:
                      f"{f(a['target_gain_db'])} | {f(a['target_gain_hi_db'])} | {f(a['interf_supp_db'])} | "
                      f"{f(a['supp_overlap_db'])} | {f(a['dif'])} | {f(a['dif_f'])} | {f(a['io_att'])} | "
                      f"{f(a['io_ge10'], '{:.0f}')} | {f(a['io_ge20'], '{:.0f}')} | {f(a['oi_att'])} | "
-                     f"{f(a['seg_io'], '{:.0f}')} | {f(a['seg_oi'], '{:.0f}')} | {f(a['seg_t'], '{:.0f}')} |")
+                     f"{f(a['seg_io'], '{:.0f}')} | {f(a['seg_oi'], '{:.0f}')} | {f(a['seg_t'], '{:.0f}')} | "
+                     f"{f(a['onset_gain'])} | {f(a['onset_gt3'], '{:.0f}')} |")
         L.append("")
     L += ["## Por N (matriz, SIR 0, -30 dBFS) e por ruído: dif / dif_f / seg só-int ≥15 (int) / seg alvo >3", "",
           "| variante | ruído | " + " | ".join(f"N={n}" for n in (1, 2, 3, 4)) + " |", "|---|---|---|---|---|---|"]
@@ -386,6 +415,11 @@ def build_report(out: Path) -> str:
 def cmd_report(a) -> None:
     out = Path(a.out)
     _MODE.update(set=a.set, floor=a.floor, release=a.release)
+    meta_p = out / ("meta.json" if a.set == "main" else f"meta-{a.set}.json")
+    if meta_p.exists():
+        meta = json.loads(meta_p.read_text())
+        if meta.get("custom_models"):
+            _MODE["models"] = {k: tuple(v) for k, v in meta["models"].items()}
     md = build_report_la(out) if a.set == "la" else build_report(out)
     name = "report.md" if a.set == "main" else f"report-{a.set}.md"
     (out / name).write_text(md)
@@ -404,6 +438,7 @@ def main() -> None:
     p.add_argument("--set", choices=["main", "la"], default="main")
     p.add_argument("--floor", type=float, default=-20.0, help="set la: piso (dB) da melhor combinação")
     p.add_argument("--release", type=float, default=200.0, help="set la: liberação (ms) da melhor combinação")
+    p.add_argument("--model", action="append", default=[], help="KEY=CKPT:ARCH:GATING (repetível)")
     p.set_defaults(fn=cmd_run)
     p = sub.add_parser("report")
     p.add_argument("--out", required=True)

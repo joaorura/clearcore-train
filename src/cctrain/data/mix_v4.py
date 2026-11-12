@@ -43,6 +43,7 @@ from cctrain.train.stage_f import TIERS, lowpass48, slot_tiers, tier_of
 HOP = 480
 NYQUIST_HZ = 24_000.0
 N_PROBS = (0.25, 0.35, 0.20, 0.12, 0.08)
+PATTERN_PROBS = (0.35, 0.30, 0.15, 0.20)
 EARLY_MS = 50.0
 PEAK_LIMIT = 10 ** (-1.0 / 20.0)
 SILENCE_MS = 1e-7
@@ -79,12 +80,20 @@ class V4Params:
     # P(N=0..4); pro-v4-presence sobe o N=0 (mais amostras para o L_guard). Fora do hash quando é o padrão, para os
     # checkpoints do pro-v4 continuarem retomáveis.
     n_probs: tuple[float, float, float, float, float] = N_PROBS
+    # pro-v4-keep: P(contínuo, conversa, blocos, esparso) e P(o interferente abrir a conversa / o bloco só-interferente
+    # vir antes do alvo), para haver mais entradas do alvo logo após o interferente. Fora do hash quando é o padrão.
+    pattern_probs: tuple[float, float, float, float] = PATTERN_PROBS
+    p_interf_first: float = 0.0
 
     def hashable(self) -> dict:
         from dataclasses import asdict
         d = asdict(self)
         if tuple(d["n_probs"]) == N_PROBS:
             d.pop("n_probs")
+        if tuple(d["pattern_probs"]) == PATTERN_PROBS:
+            d.pop("pattern_probs")
+        if d["p_interf_first"] == 0.0:
+            d.pop("p_interf_first")
         return d
 
 
@@ -149,17 +158,24 @@ def _ramp_env(on_frames: np.ndarray, n: int, ramp: int = 480) -> np.ndarray:
     return np.clip(env, 0.0, 1.0)
 
 
-def temporal_masks(rng: np.random.Generator, n_tracks: int, frames: int, target_present: bool) -> tuple[str, np.ndarray]:
-    """Padrão temporal (§2.3). Devolve (nome, on[n_tracks, frames]); a trilha 0 é o alvo."""
+def temporal_masks(rng: np.random.Generator, n_tracks: int, frames: int, target_present: bool,
+                   pattern_probs: Sequence[float] = PATTERN_PROBS, p_interf_first: float = 0.0) -> tuple[str, np.ndarray]:
+    """Padrão temporal (§2.3). Devolve (nome, on[n_tracks, frames]); a trilha 0 é o alvo.
+
+    `p_interf_first` > 0 (pro-v4-keep): com essa probabilidade a conversa começa por um interferente e, nos blocos, o
+    bloco só-interferente vem antes de um bloco com alvo (entradas do alvo logo após o interferente). Com 0 a sequência
+    de sorteios é a de sempre (runs antigos retomáveis)."""
     fps = SR / HOP  # 100 quadros/s
     on = np.ones((n_tracks, frames), bool)
     if n_tracks == 1:
         pat = "continuous" if rng.random() < 0.6 else "sparse"
     else:
-        pat = ["continuous", "conversation", "blocks", "sparse"][int(rng.choice(4, p=[0.35, 0.30, 0.15, 0.20]))]
+        pat = ["continuous", "conversation", "blocks", "sparse"][int(rng.choice(4, p=list(pattern_probs)))]
     if pat == "conversation":
         on[:] = False
         t, cur = 0.0, int(rng.integers(n_tracks))
+        if p_interf_first > 0 and rng.random() < p_interf_first:
+            cur = 1 + int(rng.integers(n_tracks - 1))
         while t < frames:
             d = rng.uniform(0.5, 2.0) * fps
             a, b = int(t), int(min(frames, t + d))
@@ -170,6 +186,8 @@ def temporal_masks(rng: np.random.Generator, n_tracks: int, frames: int, target_
             cur = nxt[int(rng.integers(len(nxt)))]
     elif pat == "blocks":
         order = list(rng.permutation(3))  # 0: só alvo, 1: ambos, 2: só interferente
+        if p_interf_first > 0 and rng.random() < p_interf_first and order[-1] == 2:
+            order = [2] + order[:-1]  # o só-interferente deixa de ser o último: algum bloco com alvo vem depois
         cuts = np.sort(rng.uniform(0.2, 0.8, 2)) * frames
         bounds = [0, int(cuts[0]), int(cuts[1]), frames]
         on[:] = False
@@ -393,7 +411,7 @@ class StageV4Dataset(Dataset):
             x, r = self._speech(rng, k, n)
             idry.append(x)
             irecs.append(r)
-        pat, on = temporal_masks(rng, 1 + n_int, frames, target_present)
+        pat, on = temporal_masks(rng, 1 + n_int, frames, target_present, p.pattern_probs, p.p_interf_first)
         tracks = [np.asarray(tdry, np.float64) * _ramp_env(on[0], n)] + \
                  [np.asarray(x, np.float64) * _ramp_env(on[k + 1], n) for k, x in enumerate(idry)]
         reverb = bool(self.pools.rirs) and rng.random() < p.p_rir
