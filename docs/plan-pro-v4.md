@@ -419,3 +419,54 @@ em C a BCE comanda a cabeça (`bce|total` 0,85) e nenhum par ~−1 domina o tron
 v3.1). Em C o `ovl` tem a maior norma no tronco (63 contra 34 do `mr`): reduzir λ_ovl para ~10 no treino longo.
 Tendência em 500 passos: pequena (≈ +4 pontos de %ZERO no só-interferente a %ZERO no alvo igual ao v3.1); metas
 (≥90% / ≤2%) longe. s/passo 0,41–0,43 → ~75k passos em 9 h, ~115k em 14 h.
+
+## 13. v4-keep (2026-11-12, `train/pro-v4-keep`): preservar a voz do alvo, treino longo LANÇADO
+
+Motivo (`runs/m4/soft-gate-eval/report.md`): todas as versões atenuam o alvo em mistura em 10–20 dB e cortam os
+primeiros 100 ms de cada trecho do alvo em ~−24 dB, com ou sem gating; o só-interferente já cai 38–48 dB. Medido no
+treino (lote do `mix_v4`, v3.1 com o gating novo): magnitude do alvo nos quadros fortes −10 a −18 dB, projeção
+complexa no alvo −16 dB, início −18 dB; o ZERO quase não age no alvo (1–3% dos quadros, inclusive nos inícios): o
+corte vem da máscara, não do gating.
+
+`scripts/train_pro_v4_keep.py`, partida do v3.1 (`ckpt-00079998`, 155/155 tensores, sem cabeça de presença), gating
+emulado = o novo por lsnr (`gate_v4`), sem L_zero/L_keep, L_guard contra o v3.1 CONGELADO (mask=0, margem 0,5 dB),
+L_lsnr como no v3.1 (alvo contra todo o resto, todos os quadros menos silêncio digital). Perdas novas:
+
+- `L_pres`: ganho do alvo G = Re⟨Y,S⟩/‖S‖² por unidade, hinge relu(−3 − 10·log10(relu(G)²+1e-4))/10. Unidades:
+  segmentos alinhados de 100 ms nos quadros de alvo forte (≥ −20 dB do máximo da trilha) das amostras com perfil e
+  N≥1; janelas de início (150 ms a partir de um quadro de alvo ativo sem alvo nos 100 ms anteriores, o critério da
+  avaliação) em qualquer amostra com perfil, peso ×4.
+- `L_wrec`: erro espectral comprimido (|·|^0,3, magnitude + complexo) por quadro, peso 1 nos quadros fortes (N≥1) e
+  +4 nas janelas de início.
+- Dados: padrões (contínuo, conversa, blocos, esparso) = 0,25/0,40/0,20/0,15 (antes 0,35/0,30/0,15/0,20) e
+  `p_interf_first` 0,7 (a conversa começa por um interferente; nos blocos o só-interferente vem antes de um bloco com
+  alvo). Os runs antigos continuam retomáveis (campos fora do hash quando no padrão).
+
+Calibração (60 passos sem atualizar, `runs/m4/v4-keep-calib`): `L_pres` 40% de L_mr com λ=1 → λ_pres 0,25;
+`L_wrec` 0,03% com λ=1 → λ_wrec 300. Frações medianas no smoke B (300 passos): os 19%, leak 13% (λ 3,0), lsnr 7,5%
+(fator 2e-3), pres 7,9%, wrec 9,7%, ovl 4,7% (λ 10), t 6%, guard 1,6% (hinge quase sempre inativo, gap +1..+3 dB).
+Sondas de gradiente (`probe.jsonl`): piores cossenos −0,6..−0,85 (os|df_reg, pres|df_reg, leak|pres, ovl|pres), nenhum
+par ~−1 dominante; df_reg com norma ~0,1 contra ~10–40 dos demais.
+
+Smoke (300 passos, LR 3e-5, avaliação `eval_soft_gate.py` no `data/eval-v4`, caminho do runtime, gating novo;
+`runs/m4/v4-keep-smoke-eval/cmp300b/report.md`), v3.1 → smoke A (leak 2, lsnr 1e-3) → smoke B (leak 3, lsnr 2e-3):
+
+| recorte | ganho do alvo (fortes) | início: ganho | só-int att (int) | seg só-int ≥15 (int) |
+|---|---|---|---|---|
+| matriz N=1 silencioso | −18,0 → −14,2 → −14,2 | −27,4 → −24,1 → −23,9 | 39,1 → 34,6 → 34,7 | 71 → 64 → 64 |
+| matriz N=1..4 silencioso | −20,0 → −17,4 → −17,5 | −26,8 → −24,9 → −25,2 | 41,4 → 37,8 → 38,5 | 89 → 83 → 84 |
+| usuário N=1 silencioso | −12,5 → −8,4 → −8,5 | −19,4 → −14,8 → −15,0 | 47,9 → 44,6 → 44,3 | 89 → 89 → 87 |
+| usuário N=1..4 silencioso | −17,3 → −13,7 → −14,0 | −25,6 → −21,7 → −22,0 | 42,4 → 38,9 → 39,4 | 95 → 92 → 92 |
+
+Dano N=0 (Δ ΔSI-SDR perfil − sem perfil): usuário silencioso −0,56 → −0,19; matriz SNR 5 −3,90 → −1,51. Escolhido o B.
+
+Run longo: `runs/m4/pro-v4-keep` (comando em `launch-cmd.txt`), 156.500 passos de cosseno (aquecimento 200, pico
+3e-5) dimensionados para terminar perto de 08:00 a ~0,415 s/passo, `--stop-at 08:00`, checkpoint a cada 15 min e no
+SIGTERM, retomada exata. Disparador: `scripts/after_train_eval_keep.sh` (espera o PID, maior passo, `eval_soft_gate.py`
+com v2_current, v31_new e keep_new, `EVAL_DONE`/`EVAL_FAILED` no run).
+
+Export: `scripts/m3_export_pro_v4_keep.py` (contrato v3: mesmo trio enc/erb_dec/df_dec, sem `p_target`), com
+`manifest.gating = {"mode": "lsnr-profile", "zero_below_db": -10, "profile": {"min_db": -10, "max_db_erb": null,
+"max_db_df": null}, "no_profile": {"mode": "lsnr", "min_db": -10, "max_db_erb": 30, "max_db_df": 20}}`: com perfil,
+ZERO se lsnr < −10, senão ERB+DF; sem perfil, o de sempre. Validado no v3.1 (asset reprodutível). O runtime deste
+checkout do Clearcore ainda não lê esse campo (só `min_db_thresh` fixo em `dsp_pipeline.rs`).
