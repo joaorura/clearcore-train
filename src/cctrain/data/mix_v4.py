@@ -76,10 +76,16 @@ class V4Params:
     p_enroll_denoise: float = 0.5
     n_neighbors: int = 50
     band_quota: tuple[float, float, float] = (0.5, 0.3, 0.2)
+    # P(N=0..4); pro-v4-presence sobe o N=0 (mais amostras para o L_guard). Fora do hash quando é o padrão, para os
+    # checkpoints do pro-v4 continuarem retomáveis.
+    n_probs: tuple[float, float, float, float, float] = N_PROBS
 
     def hashable(self) -> dict:
         from dataclasses import asdict
-        return asdict(self)
+        d = asdict(self)
+        if tuple(d["n_probs"]) == N_PROBS:
+            d.pop("n_probs")
+        return d
 
 
 # --- utilidades de sinal -------------------------------------------------------------------------------------------
@@ -368,10 +374,11 @@ class StageV4Dataset(Dataset):
         frames = n // HOP
         phase = self.phase(i)
         tier = self.slots[i % p.batch_size]
-        probs = np.array(N_PROBS[:3]) / sum(N_PROBS[:3]) if phase == 1 else np.array(N_PROBS)
+        npr = tuple(p.n_probs)
+        probs = np.array(npr[:3]) / sum(npr[:3]) if phase == 1 else np.array(npr)
         n_int = int(rng.choice(len(probs), p=probs))
         p_hard = {1: 0.20, 2: 0.35, 3: 0.50}[phase]
-        target_present = not (n_int >= 1 and rng.random() < p.p_target_absent / (1 - N_PROBS[0]))
+        target_present = not (n_int >= 1 and rng.random() < p.p_target_absent / (1 - npr[0]))
         tkeys = self.pools.target_tiers[tier]
         tkey = tkeys[int(rng.integers(len(tkeys)))]
         tdry, trec = self._speech(rng, tkey, n, tier)

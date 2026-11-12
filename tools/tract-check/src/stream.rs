@@ -149,6 +149,8 @@ pub fn run(args: &[String]) -> Result<bool> {
         ),
     ]);
     let (mut m, mut coefs, mut lsnr) = (Vec::new(), Vec::new(), Vec::new());
+    // saída opcional do enc (contrato pro-v4-presence): presença do falante-alvo por quadro
+    let mut p_target: Vec<f32> = Vec::new();
     for t in 0..frames {
         let mut f = cond.clone();
         f.insert(
@@ -167,9 +169,15 @@ pub fn run(args: &[String]) -> Result<bool> {
         m.extend_from_slice(erb.step(&fe)?["m"].as_slice::<f32>()?);
         coefs.extend_from_slice(df.step(&fe)?["coefs"].as_slice::<f32>()?);
         lsnr.extend_from_slice(e["lsnr"].as_slice::<f32>()?);
+        if let Some(p) = e.get("p_target") {
+            p_target.extend_from_slice(p.as_slice::<f32>()?);
+        }
     }
     write_f32_le(Path::new(&format!("{prefix}.m.out.f32")), &m)?;
     write_f32_le(Path::new(&format!("{prefix}.coefs.out.f32")), &coefs)?;
     write_f32_le(Path::new(&format!("{prefix}.lsnr.out.f32")), &lsnr)?;
+    if !p_target.is_empty() {
+        write_f32_le(Path::new(&format!("{prefix}.p_target.out.f32")), &p_target)?;
+    }
     Ok(true)
 }

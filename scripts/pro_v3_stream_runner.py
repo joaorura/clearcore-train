@@ -8,7 +8,7 @@ Roda os três grafos em todo quadro (sem gating): é o modo de paridade numéric
     python pro_v3_stream_runner.py --backend {ort,openvino} --asset-dir DIR --inputs in.npz --out out.npz
 
 in.npz: feat_erb [T,32], feat_spec [T,2,96] (re/im), speaker_embedding [192], speaker_present [1].
-out.npz: m [T,32], coefs [T,96,10], lsnr [T].
+out.npz: m [T,32], coefs [T,96,10], lsnr [T] (+ p_target [T] se o enc tiver essa saída, contrato v4).
 """
 
 from __future__ import annotations
@@ -74,6 +74,8 @@ def run(asset_dir: Path, backend: str, inp: dict) -> dict:
     m = np.zeros((t_total, 32), np.float32)
     coefs = np.zeros((t_total, 96, 10), np.float32)
     lsnr = np.zeros(t_total, np.float32)
+    has_p = "p_target" in man["graphs"]["enc"]["outputs"]  # contrato pro-v4-presence
+    p_target = np.zeros(t_total, np.float32)
     for t in range(t_total):
         e = step("enc", {"feat_erb": ferb[t].reshape(1, 1, 1, 32), "feat_spec": fspec[t].reshape(1, 2, 1, 96)})
         r = man["routing"]
@@ -81,7 +83,12 @@ def run(asset_dir: Path, backend: str, inp: dict) -> dict:
         coefs[t] = step("df_dec", {k: e[v.split(".")[1]] for k, v in r["df_dec"].items() if v != "runtime"}
                         )["coefs"].reshape(96, 10)
         lsnr[t] = e["lsnr"].reshape(-1)[0]
-    return {"m": m, "coefs": coefs, "lsnr": lsnr}
+        if has_p:
+            p_target[t] = e["p_target"].reshape(-1)[0]
+    out = {"m": m, "coefs": coefs, "lsnr": lsnr}
+    if has_p:
+        out["p_target"] = p_target
+    return out
 
 
 def main() -> None:
