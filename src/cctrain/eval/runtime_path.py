@@ -166,7 +166,10 @@ class ReplicaResult:
     stages: np.ndarray
 
 
-def run_replica(audio: np.ndarray, model: FrameModel, thresholds=DEFAULT_THRESHOLDS) -> ReplicaResult:
+def run_replica(audio: np.ndarray, model: FrameModel, thresholds=DEFAULT_THRESHOLDS,
+                frame_gain: np.ndarray | None = None) -> ReplicaResult:
+    """`frame_gain` (opcional): ganho de saída por quadro ANALISADO (índice dos quadros fora do silêncio digital, o
+    mesmo `t` do encoder), aplicado ao espectro de saída do quadro depois do estágio (gating suave, sem estágio novo)."""
     from libdf import DF, erb, erb_norm, unit_norm
 
     frames = len(audio) // HOP
@@ -202,6 +205,8 @@ def run_replica(audio: np.ndarray, model: FrameModel, thresholds=DEFAULT_THRESHO
             frame_out = target.copy()
             if coefs is not None:
                 frame_out[:NB_DF] = deep_filter(list(rx), coefs)
+            if frame_gain is not None:
+                frame_out = frame_out * np.float32(frame_gain[t])
             enhanced[t] = frame_out
             lsnr[active[t]] = step.lsnr
             stages[active[t]] = int(stage_of(flags))
