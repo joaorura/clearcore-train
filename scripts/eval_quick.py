@@ -11,7 +11,7 @@ Uso:
   eval_quick.py watch --snap-dir DIR --cache DIR --jsonl OUT --best-dir DIR [--done-file F]
       (laço: avalia cada snapshot novo em DIR, apaga o que não for o melhor; termina quando `done-file` existir e não
        houver pendentes)
-Melhor = mais PASS; desempate: C8, depois C6, depois C1.
+Melhor = mais PASS; desempate: C8, depois C6, depois C1 (`--tiebreak` muda a ordem; pro-v5 usa c6,c1).
 """
 
 from __future__ import annotations
@@ -188,12 +188,16 @@ def evaluate(ckpt: Path, step: int | None, cache: Path) -> dict:
     return out
 
 
-def better(a: dict, b: dict | None) -> bool:
+TIEBREAK_KEYS = {"c8": "c8_pct", "c6": "c6_db", "c1": "c1_db"}
+
+
+def better(a: dict, b: dict | None, tiebreak: str = "c8,c6,c1") -> bool:
     if b is None:
         return True
-    def key(r):  # mais PASS; desempate C8, depois C6, depois C1
-        return (r["pass"], np.nan_to_num(r.get("c8_pct", float("nan")), nan=-99),
-                np.nan_to_num(r["c6_db"], nan=-99), np.nan_to_num(r["c1_db"], nan=-99))
+    order = [TIEBREAK_KEYS[k.strip()] for k in tiebreak.split(",") if k.strip()]
+
+    def key(r):  # mais PASS; desempate na ordem de `tiebreak` (padrão C8, C6, C1; pro-v5: C6, C1)
+        return (r["pass"], *(np.nan_to_num(r.get(k, float("nan")), nan=-99) for k in order))
     ka, kb = key(a), key(b)
     return ka > kb
 
@@ -239,7 +243,7 @@ def cmd_watch(a) -> None:
             fh.write(json.dumps(r) + "\n")
         done_steps.add(step)
         print(line(r), flush=True)
-        if better(r, best):
+        if better(r, best, a.tiebreak):
             shutil.copy2(p, best_dir / "best.pt")
             r2 = dict(r, best_ckpt=str(best_dir / "best.pt"))
             bestp.write_text(json.dumps(r2, indent=1))
@@ -263,6 +267,7 @@ def main() -> None:
     p.add_argument("--jsonl", required=True)
     p.add_argument("--best-dir", required=True)
     p.add_argument("--done-file", default=None)
+    p.add_argument("--tiebreak", default="c8,c6,c1", help="desempate depois do nº de PASS (pro-v5: c6,c1)")
     p.add_argument("--threads", type=int, default=2)
     a = ap.parse_args()
     init_env(a.threads)

@@ -116,7 +116,12 @@ def build_model(ckpt: Path, arch: str, device: str):
     gen = FilmGenerator(FilmConfig(log_gamma_bound=hp.log_gamma_bound, beta_bound=hp.beta_bound)).to(device)
     m = PDFNet3Pro(base, gen, cross_attention_config=SubbandCrossAttentionConfig(**ARCHS[arch]),
                    enable_cross_attention=True, presence_head=(arch == "v4p")).to(device)
-    m.load_state_dict(load_checkpoint(Path(ckpt)).model, strict=True)
+    ck = load_checkpoint(Path(ckpt))
+    if ck.extra.get("adapter"):  # pro-v5: adaptadores LoRA/FiLM enrolados na base (ativos só com perfil)
+        from cctrain.models.adapters import AdapterConfig, attach_adapters
+
+        attach_adapters(m, AdapterConfig.from_dict(ck.extra["adapter"]))
+    m.load_state_dict(ck.model, strict=True)
     return m.eval()
 
 
@@ -144,6 +149,10 @@ class ProfileFrameModel(rp.TorchFrameModel):
         m = torch.ones((1, 1), device=dev)
         ferb = torch.from_numpy(np.ascontiguousarray(self.feat_erb))[None, None].to(dev)
         fspec = torch.from_numpy(np.stack([self.feat_spec.real, self.feat_spec.imag], 0).astype(np.float32))[None].to(dev)
+        if getattr(model, "adapter_cfg", None) is not None:  # pro-v5: liga os adaptadores (perfil ligado)
+            from cctrain.models.adapters import set_gate
+
+            set_gate(model, m.reshape(-1), emb_spk)
         with torch.no_grad():
             self._v = model.film(emb_spk, m)
             ferb = ferb + (model.freq_mixer(ferb) - ferb) * m.view(-1, 1, 1, 1)
@@ -202,6 +211,10 @@ class Runner:
     def __init__(self, ckpt: Path, arch: str, gating: "str | Gating", device: str):
         self.model = build_model(ckpt, arch, device)
         self.base_cpu = copy.deepcopy(self.model.base).to("cpu").eval()
+        if getattr(self.model, "adapter_cfg", None) is not None:  # sem perfil = adaptadores desligados
+            from cctrain.models.adapters import set_gate
+
+            set_gate(self.base_cpu, None)
         self.gating = Gating.of(gating) if isinstance(gating, str) else gating
         self.thr = self.gating.thr
 
