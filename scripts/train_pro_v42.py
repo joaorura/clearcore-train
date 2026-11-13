@@ -89,6 +89,7 @@ from cctrain.train.embed_bank import ArrayEmbeddingBank  # noqa: E402
 from cctrain.train.stage_c import _lsnr_target, _to_device, _truncate_log, total_pss  # noqa: E402
 from cctrain.train.stage_f import HOP, StageFHParams, _gated, bn_state_sha256, prepare_student  # noqa: E402
 from cctrain.data.mix_v4 import N_PROBS, PATTERN_PROBS, StageV4Dataset, V4Params, build_pools  # noqa: E402
+from cctrain.data.workers import init_worker  # noqa: E402
 
 ensure_df_importable()
 from df.loss import Istft  # noqa: E402
@@ -454,7 +455,8 @@ def main():
     log(f"pools: {json.dumps(pl.stats)} | v4 {json.dumps(vp.hashable())}")
     sampler = list(range(step * a.batch_size, len(ds)))
     dl = DataLoader(ds, batch_size=a.batch_size, sampler=sampler, num_workers=a.workers,
-                    prefetch_factor=a.prefetch if a.workers else None, persistent_workers=False)
+                    prefetch_factor=a.prefetch if a.workers else None, persistent_workers=False,
+                    worker_init_fn=init_worker)
 
     t_start = time.monotonic()
     last_ckpt = t_start

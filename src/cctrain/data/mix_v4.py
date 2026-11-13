@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
-from scipy.signal import fftconvolve, lfilter
+from scipy.signal import lfilter, oaconvolve
 from torch.utils.data import Dataset
 
 from cctrain.data.audio import load_audio, resample
@@ -110,12 +110,17 @@ class V4Params:
 
 
 def _conv(x: np.ndarray, h: np.ndarray) -> np.ndarray:
-    return fftconvolve(np.asarray(x, np.float64), np.asarray(h, np.float64))[: len(x)]
+    """Convolução com a RIR, truncada ao comprimento de `x`. FFT em float32 (≈3x mais rápida que float64; erro relativo
+    ao pico ≈2e-7, ~-134 dB, abaixo de qualquer piso de ruído da receita); a saída volta a float64 para o restante da
+    mistura (ganhos, soma, VAD) manter os dtypes de sempre."""
+    n = len(x)
+    y = oaconvolve(np.asarray(x, np.float32), np.asarray(h, np.float32))[:n]
+    return y.astype(np.float64)
 
 
 def early_rir(h: np.ndarray, ms: float = EARLY_MS) -> np.ndarray:
     peak = int(np.argmax(np.abs(h)))
-    return np.asarray(h[: peak + int(ms * SR / 1000.0) + 1], np.float64)
+    return h[: peak + int(ms * SR / 1000.0) + 1]
 
 
 def frame_levels(x: np.ndarray, n_frames: int) -> np.ndarray:
@@ -162,8 +167,18 @@ def _ramp_env(on_frames: np.ndarray, n: int, ramp: int = 480) -> np.ndarray:
     if len(env) < n:
         env = np.pad(env, (0, n - len(env)))
     if ramp > 1:
-        k = np.ones(ramp) / ramp
-        env = np.convolve(env, k, mode="same")
+        if n < ramp:  # janela maior que o sinal: o 'same' do numpy troca os papéis; caminho original
+            env = np.convolve(env, np.ones(ramp) / ramp, mode="same")
+        else:
+            # Média móvel por soma acumulada, O(n) em vez de O(n·ramp). Mesmo alinhamento do `np.convolve(..., "same")`
+            # com núcleo de `ramp` pontos: saída[i] = média de env[i-(ramp-1-(ramp-1)//2) .. i+(ramp-1)//2], fora = 0
+            # (ramp=480: janela [i-240, i+239]). Os valores 0/1 somam exatamente em float64.
+            right = (ramp - 1) // 2
+            left = ramp - 1 - right
+            c = np.zeros(n + ramp)
+            np.cumsum(env, out=c[left + 1 : left + 1 + n])
+            c[left + 1 + n :] = c[left + n]
+            env = (c[ramp : ramp + n] - c[:n]) / ramp
     return np.clip(env, 0.0, 1.0)
 
 
@@ -403,6 +418,11 @@ class StageV4Dataset(Dataset):
         self.slots = slot_tiers(p.batch_size, p.band_quota)
         self.length = length if length is not None else p.total_steps * p.batch_size
         self.provenance = bool(getattr(bank, "has_provenance", False))
+        self._rir_cache: dict[str, tuple[np.ndarray, np.ndarray]] | None = None
+
+    def __getstate__(self) -> dict:
+        # o cache de RIRs (≈43 MB f32) é por processo: nunca viaja no pickle (spawn/forkserver), cada worker monta o seu
+        return {**self.__dict__, "_rir_cache": None}
 
     def __len__(self) -> int:
         return self.length
@@ -410,6 +430,17 @@ class StageV4Dataset(Dataset):
     def _load48(self, rel: str) -> np.ndarray:
         x, sr = load_audio(self.data_root / rel)
         return resample(x, sr, SR)
+
+    def _rirs(self) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+        """Todas as RIRs (48 kHz, float32) e suas partes "early" (caminho direto + 50 ms, vista sem cópia), carregadas
+        uma vez por processo/worker: antes cada amostra relia, decodificava e reamostrava 1–5 RIRs do disco."""
+        if self._rir_cache is None:
+            cache = {}
+            for rel in self.pools.rirs:
+                h = np.ascontiguousarray(self._load48(rel), dtype=np.float32)
+                cache[rel] = (h, early_rir(h))
+            self._rir_cache = cache
+        return self._rir_cache
 
     def phase(self, i: int) -> int:
         frac = (i // self.p.batch_size) / max(self.p.total_steps, 1)
@@ -475,9 +506,9 @@ class StageV4Dataset(Dataset):
         wet, early = [], []
         for x in tracks:
             if reverb:
-                h = self._load48(self.pools.rirs[int(rng.integers(len(self.pools.rirs)))])
+                h, h_early = self._rirs()[self.pools.rirs[int(rng.integers(len(self.pools.rirs)))]]
                 wet.append(_conv(x, h))
-                early.append(_conv(x, early_rir(h)))
+                early.append(_conv(x, h_early))
             else:
                 wet.append(x)
                 early.append(x)
