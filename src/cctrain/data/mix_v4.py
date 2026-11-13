@@ -84,6 +84,12 @@ class V4Params:
     # vir antes do alvo), para haver mais entradas do alvo logo após o interferente. Fora do hash quando é o padrão.
     pattern_probs: tuple[float, float, float, float] = PATTERN_PROBS
     p_interf_first: float = 0.0
+    # pro-v42: P(padrão "turnos" nas amostras com N>=1): alvo e interferente se revezam SEM sobreposição, com pausas
+    # U[0, turn_gap_max_s] e RIR com p=p_rir_turns (caudas reverberantes do interferente sobre o início do alvo). Fora
+    # do hash quando 0 (runs antigos retomáveis).
+    p_turns: float = 0.0
+    turn_gap_max_s: float = 0.5
+    p_rir_turns: float = 0.8
 
     def hashable(self) -> dict:
         from dataclasses import asdict
@@ -94,6 +100,9 @@ class V4Params:
             d.pop("pattern_probs")
         if d["p_interf_first"] == 0.0:
             d.pop("p_interf_first")
+        if d["p_turns"] == 0.0:
+            for k in ("p_turns", "turn_gap_max_s", "p_rir_turns"):
+                d.pop(k)
         return d
 
 
@@ -158,8 +167,50 @@ def _ramp_env(on_frames: np.ndarray, n: int, ramp: int = 480) -> np.ndarray:
     return np.clip(env, 0.0, 1.0)
 
 
+PATTERNS = ("continuous", "conversation", "blocks", "sparse", "turns")
+
+
+def turns_mask(rng: np.random.Generator, n_tracks: int, frames: int, p_interf_first: float,
+               gap_max_s: float) -> np.ndarray:
+    """pro-v42: turnos alternados alvo/interferente sem sobreposição, pausas U[0, gap_max_s]. Turno do interferente
+    U[0,4, 2,0] s (um interferente sorteado por turno), do alvo U[0,6, 3,0] s (turnos longos cobrem a recuperação
+    > 2 s depois do interferente)."""
+    fps = SR / HOP
+    on = np.zeros((n_tracks, frames), bool)
+    t = 0.0
+    tgt_turn = not (rng.random() < max(p_interf_first, 0.5))
+    ni = n_tracks - 1
+    nxt = int(rng.integers(ni))  # interferentes em rodízio a partir de um sorteado
+    turns: list[tuple[int, int]] = []
+    while t < frames:
+        if tgt_turn:
+            k, d = 0, rng.uniform(0.6, 3.0) * fps
+        else:
+            k, d = 1 + nxt, rng.uniform(0.4, 2.0) * fps
+            nxt = (nxt + 1) % ni
+        a, b = int(t), int(min(frames, t + d))
+        on[k, a:b] = True
+        if k:
+            turns.append((a, b))
+        t += d + rng.uniform(0.0, gap_max_s) * fps
+        tgt_turn = not tgt_turn
+    if not on[0].any():  # item curto que só teve turno do interferente: o alvo entra no fim
+        on[0, max(0, frames - int(fps)):] = True
+        on[1:, max(0, frames - int(fps)):] = False
+    for k in range(1, n_tracks):  # interferente sem turno: fala junto com um turno de outro interferente
+        if not on[k].any():
+            if turns:
+                a, b = turns[int(rng.integers(len(turns)))]
+            else:
+                a, b = 0, min(frames, int(fps))
+                on[0, a:b] = False
+            on[k, a:b] = True
+    return on
+
+
 def temporal_masks(rng: np.random.Generator, n_tracks: int, frames: int, target_present: bool,
-                   pattern_probs: Sequence[float] = PATTERN_PROBS, p_interf_first: float = 0.0) -> tuple[str, np.ndarray]:
+                   pattern_probs: Sequence[float] = PATTERN_PROBS, p_interf_first: float = 0.0,
+                   p_turns: float = 0.0, turn_gap_max_s: float = 0.5) -> tuple[str, np.ndarray]:
     """Padrão temporal (§2.3). Devolve (nome, on[n_tracks, frames]); a trilha 0 é o alvo.
 
     `p_interf_first` > 0 (pro-v4-keep): com essa probabilidade a conversa começa por um interferente e, nos blocos, o
@@ -167,6 +218,11 @@ def temporal_masks(rng: np.random.Generator, n_tracks: int, frames: int, target_
     de sorteios é a de sempre (runs antigos retomáveis)."""
     fps = SR / HOP  # 100 quadros/s
     on = np.ones((n_tracks, frames), bool)
+    if n_tracks > 1 and p_turns > 0 and rng.random() < p_turns:
+        on = turns_mask(rng, n_tracks, frames, p_interf_first, turn_gap_max_s)
+        if not target_present:
+            on[0] = False
+        return "turns", on
     if n_tracks == 1:
         pat = "continuous" if rng.random() < 0.6 else "sparse"
     else:
@@ -411,10 +467,11 @@ class StageV4Dataset(Dataset):
             x, r = self._speech(rng, k, n)
             idry.append(x)
             irecs.append(r)
-        pat, on = temporal_masks(rng, 1 + n_int, frames, target_present, p.pattern_probs, p.p_interf_first)
+        pat, on = temporal_masks(rng, 1 + n_int, frames, target_present, p.pattern_probs, p.p_interf_first,
+                                 p.p_turns, p.turn_gap_max_s)
         tracks = [np.asarray(tdry, np.float64) * _ramp_env(on[0], n)] + \
                  [np.asarray(x, np.float64) * _ramp_env(on[k + 1], n) for k, x in enumerate(idry)]
-        reverb = bool(self.pools.rirs) and rng.random() < p.p_rir
+        reverb = bool(self.pools.rirs) and rng.random() < (p.p_rir_turns if pat == "turns" else p.p_rir)
         wet, early = [], []
         for x in tracks:
             if reverb:
@@ -513,6 +570,6 @@ class StageV4Dataset(Dataset):
             "max_freq": np.float32(max_freq), "level_db": np.float32(lvl_db),
             "sir_min_db": np.float32(min(sirs) if sirs else np.nan),
             "noise_silent": np.bool_(mode == "silent"), "noise_val": np.float32(val), "reverb": np.bool_(reverb),
-            "pattern": ["continuous", "conversation", "blocks", "sparse"].index(pat), "phase": np.int64(phase),
+            "pattern": PATTERNS.index(pat), "phase": np.int64(phase),
             "target_key": tkey, "target_path": trec[0],
         }
