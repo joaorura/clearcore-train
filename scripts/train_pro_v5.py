@@ -156,8 +156,11 @@ def dist_init() -> tuple[int, int, int]:
     world = int(os.environ.get("WORLD_SIZE", "1"))
     if world > 1:
         rank, local = int(os.environ["RANK"]), int(os.environ["LOCAL_RANK"])
-        torch.cuda.set_device(local)
-        dist.init_process_group("nccl")
+        if torch.cuda.is_available():
+            torch.cuda.set_device(local)
+            dist.init_process_group("nccl")
+        else:  # teste do caminho distribuído em CPU
+            dist.init_process_group("gloo")
         return rank, local, world
     return 0, 0, 1
 
@@ -431,7 +434,7 @@ def main():
     if device.startswith("cuda"):
         torch.cuda.reset_peak_memory_stats(device)
     end_step = min(total_steps, a.max_steps) if a.max_steps else total_steps
-    stop_reason = "total_steps"
+    stop_reason = "total_steps" if end_step == total_steps else "max_steps"
     bad_run = 0
     lf = open(log_path, "a") if is0 else None
     it = iter(dl)
