@@ -27,7 +27,7 @@ Dados: `mix_v4` com o padrão "turnos" (p_turns das amostras N≥1: revezamento 
 0–500 ms, RIR com p=0,8) e itens de 6 s (cobre recuperação > 2 s).
 
 Avaliação periódica: a cada `--eval-every` passos um snapshot vai para `<run>/snapshots/`; o `eval_quick.py watch`
-(processo separado, CPU) avalia, grava `quick-eval.jsonl` e mantém `best/best.pt` (mais PASS; desempate C6, C1).
+(processo separado, CPU) avalia, grava `quick-eval.jsonl` e mantém `best/best.pt` (mais PASS; desempate C8, C6, C1).
 Retomada, SIGTERM (salva e sai) e `--stop-at` como no keep; ao terminar grava `<run>/TRAIN_DONE`.
 """
 
@@ -95,7 +95,7 @@ from df.loss import Istft  # noqa: E402
 from df.model import ModelParams  # noqa: E402
 
 GIB = 1024**3
-TERMS = ("mr", "os", "leak", "tail", "ovl", "guard", "lsnr", "turn", "n0g", "n0", "l2sp", "pres", "wrec", "t", "df_reg")
+TERMS = ("mr", "os", "leak", "leak_abs", "tail", "ovl", "guard", "lsnr", "turn", "n0g", "n0", "l2sp", "pres", "wrec", "t", "df_reg")
 FRAME_S = HOP / 48_000
 
 
@@ -133,6 +133,9 @@ def parse_args(argv=None):
     p.add_argument("--n0g-hinge-db", type=float, default=-1.0)
     p.add_argument("--lambda-tail", type=float, default=7.5, help="L_leak extra na cauda (0–tail_s após o interferente)")
     p.add_argument("--tail-s", type=float, default=1.5)
+    p.add_argument("--p-target-absent", type=float, default=0.20)
+    p.add_argument("--lambda-leak-absent", type=float, default=3.0,
+                   help="L_leak extra nas amostras com alvo AUSENTE (C8: vista só-interferente)")
     p.add_argument("--guard-frac", type=float, default=0.12, help="fração-alvo de L_mr para o guard (λ adaptativo)")
     p.add_argument("--guard-lambda-min", type=float, default=1.0)
     p.add_argument("--guard-lambda-max", type=float, default=10.0)
@@ -263,6 +266,7 @@ def step_v42(model, ref, teacher, istft, df_params, hp: StageFHParams, b: dict, 
     since_i = since_interferer_s(ia)
     f_tail = (prof & ~ta & ~ia & iw & ~ds & (since_i <= a.tail_s)).float()
     tail = leak_loss(out, spec, f_tail)
+    leak_abs = leak_loss(out, spec, f_leak * (~b["has_target"]).float()[:, None])
 
     # L_n0 e L_guard: N=0 com perfil
     idx_g = (profile & (b["n_interf"] == 0) & b["has_target"]).nonzero(as_tuple=True)[0]
@@ -318,7 +322,7 @@ def step_v42(model, ref, teacher, istft, df_params, hp: StageFHParams, b: dict, 
 
     parts = {"mr": mr, "os": os_, "leak": a.lambda_leak * leak, "ovl": a.lambda_ovl * ovl,
              "guard": lam_guard * guard, "lsnr": ls, "turn": a.lambda_turn * turn, "n0": a.lambda_n0 * n0,
-             "n0g": a.lambda_n0g * n0g, "tail": a.lambda_tail * tail,
+             "n0g": a.lambda_n0g * n0g, "tail": a.lambda_tail * tail, "leak_abs": a.lambda_leak_absent * leak_abs,
              "l2sp": a.lambda_sp * l2sp, "pres": a.lambda_pres * pres, "wrec": a.lambda_wrec * wrec, "t": t,
              "df_reg": l_df}
     total = sum(parts.values())
@@ -347,7 +351,8 @@ def v42_params(a) -> V4Params:
     return V4Params(seed=a.seed, segment_s=a.segment_s, batch_size=a.batch_size, total_steps=a.total_steps,
                     phase1_frac=0.0, n_probs=npr if npr != N_PROBS else N_PROBS,
                     pattern_probs=pp if pp != PATTERN_PROBS else PATTERN_PROBS, p_interf_first=a.p_interf_first,
-                    p_turns=a.p_turns, turn_gap_max_s=a.turn_gap_max_s, p_rir_turns=a.p_rir_turns)
+                    p_turns=a.p_turns, turn_gap_max_s=a.turn_gap_max_s, p_rir_turns=a.p_rir_turns,
+                    p_target_absent=a.p_target_absent)
 
 
 def make_dataset(paths: Paths, vp: V4Params):
@@ -401,7 +406,8 @@ def main():
     hashed = {"v4": vp.hashable(), "lr": a.lr, "wd": a.weight_decay, "warmup": a.warmup, "total_steps": a.total_steps,
               "batch": a.batch_size,
               "lambdas": [a.lambda_leak, a.lambda_ovl, a.lambda_turn, a.lambda_n0, a.lambda_sp, a.lambda_pres,
-                          a.lambda_wrec, a.lsnr_factor, a.lambda_n0g, a.n0g_hinge_db, a.lambda_tail, a.tail_s],
+                          a.lambda_wrec, a.lsnr_factor, a.lambda_n0g, a.n0g_hinge_db, a.lambda_tail, a.tail_s,
+                          a.lambda_leak_absent],
               "turn": [a.turn_hinge_db, a.turn_boost, a.turn_decay_s],
               "guard": [a.guard_frac, a.guard_lambda_min, a.guard_lambda_max, a.guard_margin],
               "fw": a.formant_weight, "guard_ckpt": str(guard_ck), "init": str(init), "v42": 1}

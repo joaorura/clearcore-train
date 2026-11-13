@@ -22,4 +22,6 @@ WP=$!
 echo $WP >"$RUN_DIR/watch.pid"
 TRAIN_PID=$TP WATCH_PID=$WP RUN_DIR="$RUN_DIR" nohup bash scripts/after_train_eval_v42.sh >"$RUN_DIR/after-train-eval.nohup" 2>&1 &
 echo $! >"$RUN_DIR/after.pid"
+TRAIN_PID=$TP RUN_DIR="$RUN_DIR" nohup bash scripts/guard_v42.sh >"$RUN_DIR/guard.nohup" 2>&1 &
+echo $! >"$RUN_DIR/guard.pid"
 echo "train $TP | watch $WP | after $(cat "$RUN_DIR/after.pid") | log $RUN_DIR/train.log"

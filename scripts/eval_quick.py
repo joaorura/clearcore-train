@@ -11,7 +11,7 @@ Uso:
   eval_quick.py watch --snap-dir DIR --cache DIR --jsonl OUT --best-dir DIR [--done-file F]
       (laço: avalia cada snapshot novo em DIR, apaga o que não for o melhor; termina quando `done-file` existir e não
        houver pendentes)
-Melhor = mais PASS; desempate: C6 (ganho alvo-sozinho N=1), depois C1 (dano N=0).
+Melhor = mais PASS; desempate: C8, depois C6, depois C1.
 """
 
 from __future__ import annotations
@@ -172,7 +172,11 @@ def evaluate(ckpt: Path, step: int | None, cache: Path) -> dict:
     u1 = eq.qagg(eq.pick(mrows, "cand_new", "mix", axis="user", n=1))
     pd = eq.paired(mrows, "cand_new", "cand_noprof", ["d_sisdr"], axis="user", n=0, noise="silent")
     dmg, dmg_se = pd["d_sisdr"], pd["d_sisdr_se"]
-    out = {"step": step, "ckpt": str(ckpt), "pass": sum(p for p, _ in c.values()), "n_crit": len(c),
+    try:
+        c8 = float(c["C8"][1].rstrip("%"))
+    except (KeyError, ValueError):
+        c8 = float("nan")
+    out = {"c8_pct": c8, "step": step, "ckpt": str(ckpt), "pass": sum(p for p, _ in c.values()), "n_crit": len(c),
            "c6_db": u1["tonly_g_med"], "c1_db": dmg, "c1_se": dmg_se, "crit": c, "v31_crit": crit["v31_new"],
            "bins": bins_summary(bins.get("cand", {})), "v31_bins": bins_summary(ref_bins.get("v31", {})),
            "sec": round(time.time() - t0, 1), "wall": time.strftime("%F %T")}
@@ -182,8 +186,10 @@ def evaluate(ckpt: Path, step: int | None, cache: Path) -> dict:
 def better(a: dict, b: dict | None) -> bool:
     if b is None:
         return True
-    ka = (a["pass"], np.nan_to_num(a["c6_db"], nan=-99), np.nan_to_num(a["c1_db"], nan=-99))
-    kb = (b["pass"], np.nan_to_num(b["c6_db"], nan=-99), np.nan_to_num(b["c1_db"], nan=-99))
+    def key(r):  # mais PASS; desempate C8, depois C6, depois C1
+        return (r["pass"], np.nan_to_num(r.get("c8_pct", float("nan")), nan=-99),
+                np.nan_to_num(r["c6_db"], nan=-99), np.nan_to_num(r["c1_db"], nan=-99))
+    ka, kb = key(a), key(b)
     return ka > kb
 
 
