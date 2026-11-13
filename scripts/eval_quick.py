@@ -24,7 +24,12 @@ import sys
 import time
 from pathlib import Path
 
-import numpy as np
+# CPU sempre: o `init_df` do DeepFilterNet (DFNet3 upstream, carregado pelo Runner) faz `model.to(get_device())`, que é
+# CUDA quando há GPU visível, ignorando o device "cpu" pedido. Com o treino ocupando a GPU, cada snapshot do watch
+# falhava com CUDA OOM e o jsonl (e a guarda de 2k/4k) ficava vazio até o fim do treino.
+os.environ["CUDA_VISIBLE_DEVICES"] = ""
+
+import numpy as np  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "src"))
@@ -208,6 +213,7 @@ def cmd_watch(a) -> None:
     if jl.exists():
         done_steps = {json.loads(x)["step"] for x in jl.read_text().splitlines() if x.strip()}
     print(f"watch {snap} (pid {os.getpid()}); já avaliados: {sorted(done_steps)}", flush=True)
+    fails: dict[int, int] = {}
     while True:
         pend = sorted(p for p in snap.glob("ckpt-*.pt") if int(p.stem.split("-")[1]) not in done_steps)
         if not pend:
@@ -222,8 +228,12 @@ def cmd_watch(a) -> None:
         try:
             r = evaluate(p, step, Path(a.cache))
         except Exception as e:  # noqa: BLE001
-            print(f"passo {step}: ERRO {type(e).__name__}: {e}", flush=True)
-            done_steps.add(step)
+            fails[step] = fails.get(step, 0) + 1
+            print(f"passo {step}: ERRO ({fails[step]}/3) {type(e).__name__}: {e}", flush=True)
+            if fails[step] >= 3:  # desiste, mas mantém o snapshot para reavaliação manual
+                done_steps.add(step)
+            else:
+                time.sleep(60)
             continue
         with open(jl, "a") as fh:
             fh.write(json.dumps(r) + "\n")
