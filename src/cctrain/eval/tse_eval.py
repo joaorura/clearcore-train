@@ -214,24 +214,52 @@ class Runner:
         tail = np.random.default_rng(0).standard_normal(4 * rp.HOP).astype(np.float32) * np.float32(10 ** (-55 / 20))
         return np.concatenate([np.asarray(noisy, np.float32).reshape(-1), tail]), n
 
-    def run(self, noisy: np.ndarray, profile: np.ndarray | None) -> tuple[np.ndarray, np.ndarray]:
+    def run(self, noisy: np.ndarray, profile: np.ndarray | None, shadow: list[np.ndarray] | None = None) -> tuple:
+        """-> (saída, estágios) ou, com `shadow` (componentes da entrada), (saída, estágios, [saída-sombra de cada um])."""
         audio, n = self._padded(noisy)
         if profile is not None:
-            return self.run_multi(noisy, profile, {"_": self.gating})["_"]
-        res = rp.run_replica(audio, rp.TorchFrameModel(self.base_cpu, None, audio, CURRENT), CURRENT)
-        return rp.align_runtime(res.audio, n), res.stages[: n // rp.HOP]
+            return self.run_multi(noisy, profile, {"_": self.gating}, shadow=shadow)["_"]
+        res = rp.run_replica(audio, rp.TorchFrameModel(self.base_cpu, None, audio, CURRENT), CURRENT,
+                             shadow=_pad_shadow(shadow, audio.size))
+        return _result(res, n, shadow is not None)
 
-    def run_multi(self, noisy: np.ndarray, profile: np.ndarray, gatings: dict[str, Gating]
-                  ) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+    def run_multi(self, noisy: np.ndarray, profile: np.ndarray, gatings: dict[str, Gating],
+                  shadow: list[np.ndarray] | None = None) -> dict[str, tuple]:
         """Vários gatings sobre o MESMO encoder (o forward do encoder é o custo; os decoders rodam por gating)."""
         audio, n = self._padded(noisy)
         pm = ProfileFrameModel(self.model, profile, audio)
         out = {}
         for name, g in gatings.items():
             thr, fg = pm.set_gating(g)
-            res = rp.run_replica(audio, pm, thr, frame_gain=fg)
-            out[name] = (rp.align_runtime(res.audio, n), res.stages[: n // rp.HOP])
+            res = rp.run_replica(audio, pm, thr, frame_gain=fg, shadow=_pad_shadow(shadow, audio.size))
+            out[name] = _result(res, n, shadow is not None)
         return out
+
+
+def _pad_shadow(shadow: list[np.ndarray] | None, size: int) -> list[np.ndarray] | None:
+    if shadow is None:
+        return None
+    return [np.pad(np.asarray(x, np.float32).reshape(-1), (0, max(0, size - np.asarray(x).size)))[:size] for x in shadow]
+
+
+def _result(res: rp.ReplicaResult, n: int, with_shadow: bool) -> tuple:
+    out = (rp.align_runtime(res.audio, n), res.stages[: n // rp.HOP])
+    if with_shadow:
+        out = out + ([rp.align_runtime(x, n) for x in res.shadow],)
+    return out
+
+
+class BaseRunner(Runner):
+    """DFNet3 publicado (upstream, sem perfil e sem isolamento), gating atual: referência de remoção de ruído."""
+
+    def __init__(self, device: str = "cpu"):
+        from cctrain.models.dfnet3_upstream import load_upstream_dfnet3
+
+        base, _ = load_upstream_dfnet3(device="cpu")
+        self.model = None
+        self.base_cpu = base.eval()
+        self.gating = Gating.of("current")
+        self.thr = self.gating.thr
 
 
 # --- métricas ------------------------------------------------------------------------------------------------------
@@ -346,9 +374,141 @@ def segment_metrics(view: str, nf: int, noisy: np.ndarray, enh: np.ndarray, t: n
         out["seg_t_n"], out["seg_t_gt3"] = n_t, hit_t
 
 
+# --- qualidade do alvo: picote (dropouts), instabilidade do ganho, ESTOI ativo, ruído ---------------------------------
+#
+# Todas sobre a SAÍDA-SOMBRA do alvo (`run_replica(shadow=...)`): o alvo limpo processado com as mesmas decisões que o
+# modelo tomou sobre a mistura. A soma das sombras reproduz a saída (-136 dB de erro), então o ganho do alvo por quadro é
+# exato e não depende de projeção (sem o viés de fase/coloração dos mínimos quadrados).
+
+Q_LOCAL_FRAMES = 50  # máximo local do nível do alvo em ±500 ms (101 quadros)
+Q_ACT_REL_DB = 30.0  # quadro ativo: nível do alvo >= máximo local - 30 dB (e > VAD_FLOOR_DB)
+Q_DROP_REL_DB = 10.0  # quadro caído: ganho <= mediana do item - 10 dB ...
+Q_DROP_ABS_DB = -10.0  # ... ou <= -10 dB absoluto (limiar = max(mediana - 10, -10))
+Q_DROP_MIN, Q_DROP_MAX = 2, 30  # dropout = 20..300 ms contíguos de quadros ativos caídos; > 300 ms = supressão longa
+Q_GAIN_CLIP = (-60.0, 20.0)
+
+
+def target_active_local(t: np.ndarray, nf: int) -> np.ndarray:
+    """Quadros (10 ms) com alvo ativo pelo critério LOCAL: nível >= máximo em ±500 ms - 30 dB e acima do piso do VAD.
+    O critério local (e não o pico do item) não descarta frases mais baixas do mesmo item."""
+    lv = tm.frame_db(t)[:nf]
+    if not lv.size:
+        return np.zeros(0, bool)
+    pad = np.pad(lv, Q_LOCAL_FRAMES, constant_values=-np.inf)
+    loc = np.max(np.lib.stride_tricks.sliding_window_view(pad, 2 * Q_LOCAL_FRAMES + 1), axis=1)
+    return (lv >= loc - Q_ACT_REL_DB) & (lv > tm.VAD_FLOOR_DB)
+
+
+def frame_gain_db(src: np.ndarray, out: np.ndarray, nf: int) -> np.ndarray:
+    return np.clip(10 * np.log10((frame_energy(out, nf) + 1e-14) / (frame_energy(src, nf) + 1e-14)), *Q_GAIN_CLIP)
+
+
+def runs_of(mask: np.ndarray) -> list[tuple[int, int]]:
+    """Trechos contíguos [a, b) de `True`."""
+    m = np.concatenate([[False], np.asarray(mask, bool), [False]])
+    d = np.flatnonzero(np.diff(m.astype(np.int8)))
+    return list(zip(d[0::2].tolist(), d[1::2].tolist()))
+
+
+def dropouts(g: np.ndarray, act: np.ndarray) -> dict:
+    """Dropouts do alvo. `g` ganho por quadro (dB), `act` quadros ativos. Quadro caído = ativo e g <= max(mediana(g[act])
+    - 10, -10). Trechos contíguos de quadros caídos (um quadro inativo interrompe o trecho): 2..30 quadros (20..300 ms) =
+    dropout; > 30 = supressão longa; 1 quadro = ignorado (abaixo da resolução da STFT de 20 ms)."""
+    ga = g[act]
+    med = float(np.median(ga))
+    thr = max(med - Q_DROP_REL_DB, Q_DROP_ABS_DB)
+    drop = act & (g <= thr)
+    ev, long_f = [], 0
+    for a, b in runs_of(drop):
+        if Q_DROP_MIN <= b - a <= Q_DROP_MAX:
+            ev.append((a, b, float(g[a:b].min())))
+        elif b - a > Q_DROP_MAX:
+            long_f += b - a
+    pairs = act[1:] & act[:-1]
+    return {"med": med, "thr": thr, "events": ev, "drop_frames": sum(b - a for a, b, _ in ev), "long_frames": long_f,
+            "p10": float(np.percentile(ga, 10)), "std": float(np.std(ga)),
+            "dstep": float(np.mean(np.abs(np.diff(g))[pairs])) if pairs.any() else float("nan")}
+
+
+def quality_metrics(view: str, r: tm.Rendered, noisy: np.ndarray, enh: np.ndarray, shadow: list[np.ndarray],
+                    base: dict, out: dict, scorer=None) -> None:
+    """Picote/instabilidade/ESTOI ativo do alvo e, com ruído, atenuação do ruído (sombras: [alvo, ruído])."""
+    from cctrain.eval.metrics import stoi
+
+    t = r.target
+    nf = len(t) // tm.HOP
+    act = target_active_local(t, nf)
+    if act.sum() < 20:
+        return
+    g = frame_gain_db(t, shadow[0], nf)
+    d = dropouts(g, act)
+    out["q_act_frames"] = int(act.sum())
+    out["q_drop_n"] = len(d["events"])
+    out["q_drop_frames"] = d["drop_frames"]
+    out["q_long_frames"] = d["long_frames"]
+    for k in ("med", "p10", "std", "dstep"):
+        out[f"q_g_{k}"] = d[k]
+    if r.interf.shape[0]:
+        # quadros ativos do alvo SEM interferente ativo (alvo sozinho) e COM interferente (sobreposição)
+        drop_f = np.zeros(nf, bool)
+        for a, b, _ in d["events"]:
+            drop_f[a:b] = True
+        for key, m in (("tonly", act & ~r.int_act[:nf]), ("both", act & r.int_act[:nf])):
+            if m.sum() >= 10:
+                out[f"q_{key}_frames"] = int(m.sum())
+                out[f"q_{key}_g_med"] = float(np.median(g[m]))
+                out[f"q_{key}_g_p10"] = float(np.percentile(g[m], 10))
+                out[f"q_{key}_drop_frames"] = int((drop_f & m).sum())
+                out[f"q_{key}_low10_frames"] = int((g[m] <= -10.0).sum())
+    ms = frame_mask_samples(act, len(t)).astype(bool)
+    if ms.sum() >= tm.SR:  # >= 1 s de fala ativa concatenada
+        e_out = float(stoi(enh[ms], t[ms], tm.SR, extended=True)[0])
+        out["estoi_act"] = e_out
+        if "estoi_in_act" in base:
+            out["d_estoi_act"] = e_out - base["estoi_in_act"]
+    if "estoi_in" in base and "d_estoi" not in out:
+        out["d_estoi"] = float(stoi(enh, t, tm.SR, extended=True)[0]) - base["estoi_in"]
+    if scorer is not None:
+        from cctrain.data.resample import to_16k
+
+        out.update({f"dnsmos_{k}": v for k, v in scorer.score(to_16k(enh.astype(np.float32), tm.SR)).items()})
+    nz = r.noise
+    if len(shadow) > 1 and float(np.sum(nz.astype(np.float64) ** 2)) > 0:
+        en_in, en_out = frame_energy(nz, nf), frame_energy(shadow[1], nf)
+        ok = en_in > 1e-12
+        sil = ~tm.activity(t)[:nf] & ~act & ok
+        if r.interf.shape[0]:
+            sil &= ~r.int_act[:nf]
+        a_n = np.clip(10 * np.log10((en_in + 1e-14) / (en_out + 1e-14)), -ATT_CLIP_DB, ATT_CLIP_DB)
+        if sil.sum() >= 10:
+            out["n_att_sil_mean"] = float(a_n[sil].mean())
+            out["n_att_sil_p10"] = float(np.percentile(a_n[sil], 10))
+            out["n_sil_frames"] = int(sil.sum())
+        sp = act & ok
+        if sp.sum() >= 10:
+            # ruído residual durante a fala: atenuação do ruído (sombra do ruído) e SNR de saída nesses quadros
+            out["n_att_speech"] = _db(float(en_in[sp].sum()), float(en_out[sp].sum()))
+            et = frame_energy(shadow[0], nf)
+            out["snr_out_speech"] = _db(float(et[sp].sum()), float(en_out[sp].sum()))
+            out["snr_in_speech"] = _db(float(frame_energy(t, nf)[sp].sum()), float(en_in[sp].sum()))
+
+
+def quality_baseline(r: tm.Rendered, noisy: np.ndarray, base: dict) -> dict:
+    """Acrescenta a `base` o ESTOI da entrada só nas regiões com alvo ativo (mesma máscara de `quality_metrics`)."""
+    from cctrain.eval.metrics import stoi
+
+    t = r.target
+    act = target_active_local(t, len(t) // tm.HOP)
+    ms = frame_mask_samples(act, len(t)).astype(bool)
+    if ms.sum() >= tm.SR:
+        base["estoi_in_act"] = float(stoi(noisy[ms], t[ms], tm.SR, extended=True)[0])
+    return base
+
+
 def item_metrics(view: str, rec: dict, r: tm.Rendered, noisy: np.ndarray, enh: np.ndarray, stages: np.ndarray,
-                 base: dict) -> dict:
-    """Métricas de uma execução. `base`: STOI/ESTOI/SI-SDR da entrada (calculados uma vez por item)."""
+                 base: dict, shadow: list[np.ndarray] | None = None, scorer=None) -> dict:
+    """Métricas de uma execução. `base`: STOI/ESTOI/SI-SDR da entrada (calculados uma vez por item). `shadow`: saídas-
+    sombra [alvo, ruído] (habilita `quality_metrics`)."""
     from cctrain.eval.metrics import stoi
 
     out: dict = {}
@@ -419,6 +579,8 @@ def item_metrics(view: str, rec: dict, r: tm.Rendered, noisy: np.ndarray, enh: n
                 frame_group_metrics("oi", att_db(e_in, e_out), only_i, out)
     segment_metrics(view, nf, noisy, enh, t, ints, tact, iact, out)
     onset_metrics(nf, enh, t, ints, tact, out)
+    if shadow is not None:
+        quality_metrics(view, r, noisy, enh, shadow, base, out, scorer)
     return out
 
 
