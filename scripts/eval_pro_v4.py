@@ -20,6 +20,7 @@ import os
 import sys
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
@@ -182,7 +183,7 @@ def cmd_prep(a) -> None:
 _W: dict = {}
 
 
-def _init_worker(set_dir: str, ckpt: str, arch: str, gating: str, device: str, threads: int) -> None:
+def _init_worker(set_dir: str, ckpt: str, arch: str, gating, device: str, threads: int) -> None:
     import torch
 
     torch.set_num_threads(threads)
@@ -241,6 +242,17 @@ def select_recipes(recs: list[dict], subset: str) -> list[dict]:
     return keep
 
 
+def make_gating(a):
+    """`current`/`new` (lsnr), `hard` (presença p_target, máquina de estados) ou `soft` (ganho suave por quadro)."""
+    from cctrain.eval import tse_eval as te
+
+    if a.gating in te.GATINGS:
+        return te.Gating.of(a.gating)
+    if a.gating == "hard":
+        return te.Gating("hard", tau_on=a.tau_on, tau_off=a.tau_off, hangover=a.hangover)
+    return te.Gating("soft", floor_db=a.floor_db, attack_ms=a.attack_ms, release_ms=a.release_ms)
+
+
 def cmd_run(a) -> Path:
     sd = Path(a.set)
     out = Path(a.out)
@@ -263,7 +275,7 @@ def cmd_run(a) -> Path:
     todo = [r for r in recs if pending(r)]
     log(f"{a.ckpt} [{a.arch}, gating {a.gating}, {a.device}]: {len(recs)} itens, {len(todo)} pendentes, "
         f"{a.workers} processos x {a.threads} threads")
-    meta = {"ckpt": str(a.ckpt), "arch": a.arch, "gating": a.gating, "device": a.device, "subset": a.subset,
+    meta = {"ckpt": str(a.ckpt), "arch": a.arch, "gating": a.gating, "gating_params": {k: ([float(x) for x in v] if isinstance(v, tuple) else v) for k, v in asdict(make_gating(a)).items()}, "device": a.device, "subset": a.subset,
             "workers": a.workers, "threads": a.threads, "recipes_sha256": tm.recipes_digest(sd / "recipes.jsonl"),
             "label": a.label or f"{a.arch}_{a.gating}", "started": time.strftime("%F %T")}
     (out / "meta.json").write_text(json.dumps(meta, indent=1))
@@ -272,7 +284,7 @@ def cmd_run(a) -> Path:
     if chunks:
         ctx = mp.get_context("spawn")
         with ProcessPoolExecutor(a.workers, mp_context=ctx, initializer=_init_worker,
-                                 initargs=(str(sd), str(a.ckpt), a.arch, a.gating, a.device, a.threads)) as ex, \
+                                 initargs=(str(sd), str(a.ckpt), a.arch, make_gating(a), a.device, a.threads)) as ex, \
                 open(rows_path, "a") as fh:
             futs = [ex.submit(_work, c) for c in chunks]
             n = 0
@@ -496,8 +508,14 @@ def main() -> None:
     def runargs(p):
         common(p)
         p.add_argument("--ckpt", required=True)
-        p.add_argument("--arch", choices=["v2", "v3", "v4"], default="v4")
-        p.add_argument("--gating", choices=["current", "new"], default="new")
+        p.add_argument("--arch", choices=["v2", "v3", "v4", "v4p"], default="v4")
+        p.add_argument("--gating", choices=["current", "new", "hard", "soft"], default="new")
+        p.add_argument("--tau-on", type=float, default=0.3, help="gating hard: τ_on da p_target")
+        p.add_argument("--tau-off", type=float, default=0.1)
+        p.add_argument("--hangover", type=int, default=12, help="quadros de 10 ms")
+        p.add_argument("--floor-db", type=float, default=-20.0, help="gating soft: piso do ganho (dB)")
+        p.add_argument("--attack-ms", type=float, default=15.0)
+        p.add_argument("--release-ms", type=float, default=200.0)
         p.add_argument("--device", default="cuda" if os.environ.get("CUDA_VISIBLE_DEVICES", "x") != "" else "cpu")
         p.add_argument("--workers", type=int, default=8)
         p.add_argument("--threads", type=int, default=1)

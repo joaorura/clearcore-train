@@ -27,11 +27,76 @@ CURRENT = (np.float32(-10.0), np.float32(30.0), np.float32(20.0))
 NEW_PROFILE = (np.float32(-10.0), np.float32("inf"), np.float32("inf"))
 GATINGS = {"current": CURRENT, "new": NEW_PROFILE}
 
-ARCHS = {  # num_tokens, token_dim, proj_dim (contrato v2 = K8/D64; v3 e v4 = K16/D128)
+ARCHS = {  # num_tokens, token_dim, proj_dim (contrato v2 = K8/D64; v3 e v4 = K16/D128; v4p = v4 + cabeça p_target)
     "v2": dict(query_dim=512, embedding_dim=192, proj_dim=64, num_heads=4, num_tokens=8, token_dim=64),
     "v3": dict(query_dim=512, embedding_dim=192, proj_dim=128, num_heads=4, num_tokens=16, token_dim=128),
     "v4": dict(query_dim=512, embedding_dim=192, proj_dim=128, num_heads=4, num_tokens=16, token_dim=128),
+    "v4p": dict(query_dim=512, embedding_dim=192, proj_dim=128, num_heads=4, num_tokens=16, token_dim=128),
 }
+
+
+@dataclass(frozen=True)
+class Gating:
+    """Gating COM perfil. `lsnr`: estágios por lsnr (`thr`, como GATINGS); `hard`: presença p_target pela máquina de
+    estados do runtime (τ_on/τ_off/hangover) -> ERB+DF ou ZERO; `soft`: sempre ERB+DF (sem ZERO, sem passthrough) e
+    ganho de saída por quadro g = floor + (1-floor)·s, s = p_target suavizado (ataque/liberação de um polo)."""
+
+    kind: str = "lsnr"
+    thr: tuple = NEW_PROFILE
+    tau_on: float = 0.3
+    tau_off: float = 0.1
+    hangover: int = 12
+    floor_db: float = -20.0
+    attack_ms: float = 15.0
+    release_ms: float = 200.0
+    lookahead_ms: float = 0.0  # soft: p_target := máximo em [t, t+L] antes da suavização (saída atrasada L ms)
+    window_ms: float = 0.0  # kind `window`: mediana de p_target em janelas fixas (alinhadas ao início), saída atrasada W
+
+    @staticmethod
+    def of(name: str) -> "Gating":
+        return Gating("lsnr", GATINGS[name])
+
+
+def lookahead_max(p: np.ndarray, frames: int) -> np.ndarray:
+    """p'[t] = max(p[t .. t+frames]) (não causal: exige `frames` quadros de atraso na saída)."""
+    p = np.asarray(p, np.float64)
+    if frames <= 0:
+        return p
+    pad = np.concatenate([p, np.full(frames, p[-1] if len(p) else 0.0)])
+    return np.max(np.lib.stride_tricks.sliding_window_view(pad, frames + 1), axis=1)[: len(p)]
+
+
+def window_gain(p: np.ndarray, floor_db: float, window_ms: float, hop_ms: float = 10.0) -> np.ndarray:
+    """Decisão por janela fixa: g = floor + (1-floor)·mediana(p) da janela, aplicado à janela inteira."""
+    floor = 10.0 ** (floor_db / 20.0)
+    w = max(int(round(window_ms / hop_ms)), 1)
+    out = np.empty(len(p), np.float32)
+    for a in range(0, len(p), w):
+        out[a : a + w] = floor + (1.0 - floor) * float(np.median(p[a : a + w]))
+    return out
+
+
+def soft_gain(p: np.ndarray, floor_db: float, attack_ms: float, release_ms: float, hop_ms: float = 10.0,
+              lookahead_ms: float = 0.0) -> np.ndarray:
+    """g[t] = floor + (1 - floor)·s[t]; s = p suavizado causalmente (sobe com `attack_ms`, desce com `release_ms`;
+    constantes de tempo de um polo). Estado inicial s=0 (o runtime parte de 'ausente')."""
+    floor = 10.0 ** (floor_db / 20.0)
+    a_up, a_dn = (1.0 - math.exp(-hop_ms / max(ms, 1e-3)) for ms in (attack_ms, release_ms))
+    s, out = 0.0, np.empty(len(p), np.float32)
+    for t, v in enumerate(lookahead_max(p, int(round(lookahead_ms / hop_ms)))):
+        s += (a_up if v > s else a_dn) * (v - s)
+        out[t] = floor + (1.0 - floor) * s
+    return out
+
+
+def presence_pass(p: np.ndarray, tau_on: float, tau_off: float, hangover: int) -> np.ndarray:
+    """Mesma máquina de estados de `train_pro_v4_presence.presence_state_machine` (histerese + hangover)."""
+    active, hang, out = False, 0, np.zeros(len(p), bool)
+    for i, v in enumerate(np.asarray(p, np.float64)):
+        active = v >= (tau_off if active else tau_on)
+        hang = hangover if active else max(hang - 1, 0)
+        out[i] = active or hang > 0
+    return out
 
 
 # --- modelo -------------------------------------------------------------------------------------------------------
@@ -50,36 +115,73 @@ def build_model(ckpt: Path, arch: str, device: str):
     hp = StageFHParams.from_config(load_stage_f_config())
     gen = FilmGenerator(FilmConfig(log_gamma_bound=hp.log_gamma_bound, beta_bound=hp.beta_bound)).to(device)
     m = PDFNet3Pro(base, gen, cross_attention_config=SubbandCrossAttentionConfig(**ARCHS[arch]),
-                   enable_cross_attention=True).to(device)
+                   enable_cross_attention=True, presence_head=(arch == "v4p")).to(device)
     m.load_state_dict(load_checkpoint(Path(ckpt)).model, strict=True)
     return m.eval()
 
 
 class ProfileFrameModel(rp.TorchFrameModel):
-    """`TorchFrameModel` com o forward completo do PDFNet3Pro (FiLM + freq_mixer + cross-attention), mask=1."""
+    """`TorchFrameModel` com o forward completo do PDFNet3Pro (FiLM + freq_mixer + cross-attention), mask=1.
 
-    def __init__(self, model, embedding, audio, thresholds):
+    O encoder roda uma vez (`self.p` = p_target por quadro, se o modelo tem a cabeça); os decoders rodam em
+    `set_gating`, só nos quadros que o gating manda decodificar (como o runtime, que não avança o decoder parado).
+    Para presença/soft o lsnr entregue à réplica é sintético (0 = ERB+DF, -100 = ZERO) com limiares (-10, inf, inf).
+    """
+
+    def __init__(self, model, embedding, audio, thresholds=None):
         _, self.feat_erb, self.feat_spec = rp.replica_features(audio)
         self.lsnr = np.zeros(0, np.float32)
+        self.lsnr_true = self.lsnr
+        self.p = np.zeros(0, np.float32)
         self.gains, self.coefs, self.t = {}, {}, 0
-        if not len(self.feat_erb):
+        self.n = len(self.feat_erb)
+        if not self.n:
             return
         dev = next(model.parameters()).device
         base = model.base
+        self._model = model
         emb_spk = torch.from_numpy(np.asarray(embedding, np.float32))[None].to(dev)
         m = torch.ones((1, 1), device=dev)
         ferb = torch.from_numpy(np.ascontiguousarray(self.feat_erb))[None, None].to(dev)
         fspec = torch.from_numpy(np.stack([self.feat_spec.real, self.feat_spec.imag], 0).astype(np.float32))[None].to(dev)
         with torch.no_grad():
-            v = model.film(emb_spk, m)
+            self._v = model.film(emb_spk, m)
             ferb = ferb + (model.freq_mixer(ferb) - ferb) * m.view(-1, 1, 1, 1)
-            e0, e1, e2, e3, emb, c0, lsnr = base.enc(ferb, fspec, film=(v.gamma_enc, v.beta_enc))
+            e0, e1, e2, e3, emb, c0, lsnr = base.enc(ferb, fspec, film=(self._v.gamma_enc, self._v.beta_enc))
             a = model.cross_attn(emb, emb_spk, mask=m)
-            emb_d, sg = a.output, a.subband_gains[0, 0]
-            self.lsnr = lsnr.reshape(-1).cpu().numpy().astype(np.float32)
-            flags = [rp.apply_stages(x, thresholds) for x in self.lsnr]
-            erb_idx = [t for t, f in enumerate(flags) if f[0]]
-            df_idx = [t for t, f in enumerate(flags) if f[2]]
+            self._enc = (e0, e1, e2, e3, c0, a.output, a.subband_gains[0, 0])
+            self.lsnr_true = lsnr.reshape(-1).cpu().numpy().astype(np.float32)
+            if getattr(model, "presence", None) is not None:
+                logit, _ = model.presence(a.output, emb_spk)
+                self.p = torch.sigmoid(logit.float()).reshape(-1).cpu().numpy().astype(np.float32)
+
+    def set_gating(self, g: "Gating") -> tuple:
+        """Calcula os decoders para o gating `g`. Devolve `(thresholds para run_replica, frame_gain ou None)`."""
+        self.gains, self.coefs, self.t = {}, {}, 0
+        if not self.n:
+            return g.thr if g.kind == "lsnr" else NEW_PROFILE, None
+        frame_gain = None
+        if g.kind == "lsnr":
+            thr, self.lsnr = g.thr, self.lsnr_true
+            flags = [rp.apply_stages(x, thr) for x in self.lsnr]
+        else:
+            if not len(self.p):
+                raise ValueError("gating de presença exige modelo com cabeça p_target (arch v4p)")
+            thr = NEW_PROFILE
+            if g.kind == "hard":
+                ok = presence_pass(self.p, g.tau_on, g.tau_off, g.hangover)
+            else:  # soft / window: nunca ZERO
+                ok = np.ones(self.n, bool)
+                frame_gain = window_gain(self.p, g.floor_db, g.window_ms) if g.kind == "window" else \
+                    soft_gain(self.p, g.floor_db, g.attack_ms, g.release_ms, lookahead_ms=g.lookahead_ms)
+            self.lsnr = np.where(ok, 0.0, -100.0).astype(np.float32)
+            flags = [rp.apply_stages(x, thr) for x in self.lsnr]
+        dev = next(self._model.parameters()).device
+        base = self._model.base
+        e0, e1, e2, e3, c0, emb_d, sg = self._enc
+        erb_idx = [t for t, f in enumerate(flags) if f[0]]
+        df_idx = [t for t, f in enumerate(flags) if f[2]]
+        with torch.no_grad():
             if erb_idx:
                 i = torch.tensor(erb_idx, device=dev)
                 mm = base.erb_dec(emb_d[:, i], e3[:, :, i], e2[:, :, i], e1[:, :, i], e0[:, :, i]) * sg[i][None, None]
@@ -87,31 +189,49 @@ class ProfileFrameModel(rp.TorchFrameModel):
                 self.gains = {t: mm[0, 0, k].astype(np.float32) for k, t in enumerate(erb_idx)}
             if df_idx:
                 i = torch.tensor(df_idx, device=dev)
-                c = base.df_dec(emb_d[:, i], c0[:, :, i], film=(v.gamma_df, v.beta_df))
+                c = base.df_dec(emb_d[:, i], c0[:, :, i], film=(self._v.gamma_df, self._v.beta_df))
                 c = c[0].cpu().numpy().reshape(len(df_idx), rp.NB_DF, rp.DF_ORDER, 2)
                 self.coefs = {t: (c[k, ..., 0] + 1j * c[k, ..., 1]).astype(np.complex64) for k, t in enumerate(df_idx)}
+        return thr, frame_gain
 
 
 class Runner:
-    """Roda uma mistura pelo caminho do runtime. `profile=None` = sem perfil (DFNet3 base, gating atual)."""
+    """Roda uma mistura pelo caminho do runtime. `profile=None` = sem perfil (DFNet3 base, gating atual).
+    `gating`: nome de GATINGS ('current'/'new') ou um `Gating` (hard/soft de presença exigem arch v4p)."""
 
-    def __init__(self, ckpt: Path, arch: str, gating: str, device: str):
+    def __init__(self, ckpt: Path, arch: str, gating: "str | Gating", device: str):
         self.model = build_model(ckpt, arch, device)
         self.base_cpu = copy.deepcopy(self.model.base).to("cpu").eval()
-        self.thr = GATINGS[gating]
+        self.gating = Gating.of(gating) if isinstance(gating, str) else gating
+        self.thr = self.gating.thr
 
-    def run(self, noisy: np.ndarray, profile: np.ndarray | None) -> tuple[np.ndarray, np.ndarray]:
+    @staticmethod
+    def _padded(noisy: np.ndarray) -> tuple[np.ndarray, int]:
         n = np.asarray(noisy).size
         # o runtime atrasa 1.440 amostras: sem cauda de silêncio os últimos 3 hops da saída se perderiam e o SI-SDR
         # do passthrough puro cairia para ~14 dB. A cauda é ruído a -55 dBFS (silêncio digital seria pulado pelo atalho
         # do runtime e não empurraria a saída) e sai do cômputo (estágios cortados em n // HOP).
         tail = np.random.default_rng(0).standard_normal(4 * rp.HOP).astype(np.float32) * np.float32(10 ** (-55 / 20))
-        audio = np.concatenate([np.asarray(noisy, np.float32).reshape(-1), tail])
-        if profile is None:
-            res = rp.run_replica(audio, rp.TorchFrameModel(self.base_cpu, None, audio, CURRENT), CURRENT)
-        else:
-            res = rp.run_replica(audio, ProfileFrameModel(self.model, profile, audio, self.thr), self.thr)
+        return np.concatenate([np.asarray(noisy, np.float32).reshape(-1), tail]), n
+
+    def run(self, noisy: np.ndarray, profile: np.ndarray | None) -> tuple[np.ndarray, np.ndarray]:
+        audio, n = self._padded(noisy)
+        if profile is not None:
+            return self.run_multi(noisy, profile, {"_": self.gating})["_"]
+        res = rp.run_replica(audio, rp.TorchFrameModel(self.base_cpu, None, audio, CURRENT), CURRENT)
         return rp.align_runtime(res.audio, n), res.stages[: n // rp.HOP]
+
+    def run_multi(self, noisy: np.ndarray, profile: np.ndarray, gatings: dict[str, Gating]
+                  ) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+        """Vários gatings sobre o MESMO encoder (o forward do encoder é o custo; os decoders rodam por gating)."""
+        audio, n = self._padded(noisy)
+        pm = ProfileFrameModel(self.model, profile, audio)
+        out = {}
+        for name, g in gatings.items():
+            thr, fg = pm.set_gating(g)
+            res = rp.run_replica(audio, pm, thr, frame_gain=fg)
+            out[name] = (rp.align_runtime(res.audio, n), res.stages[: n // rp.HOP])
+        return out
 
 
 # --- métricas ------------------------------------------------------------------------------------------------------
@@ -147,6 +267,85 @@ def frame_mask_samples(mask: np.ndarray, n: int) -> np.ndarray:
     return np.pad(m, (0, max(0, n - m.size)))[:n]
 
 
+
+# --- métricas por quadro/segmento (gating suave): atenuação em dB por quadros de 10 ms e segmentos de 300 ms ------------
+
+SEG_FRAMES = 30  # 300 ms
+ATT_CLIP_DB = 60.0
+HI_REL_DB = 20.0  # "quadros com energia do alvo >= -20 dB do máximo"
+
+
+def frame_energy(x: np.ndarray, nf: int) -> np.ndarray:
+    return (np.asarray(x[: nf * tm.HOP], np.float64).reshape(nf, tm.HOP) ** 2).sum(axis=1)
+
+
+def att_db(e_in: np.ndarray | float, e_out: np.ndarray | float):
+    """Atenuação em dB (entrada/saída), limitada a ±60 dB (saída zerada não vira +inf)."""
+    return np.clip(10 * np.log10((np.asarray(e_in) + 1e-12) / (np.asarray(e_out) + 1e-12)), -ATT_CLIP_DB, ATT_CLIP_DB)
+
+
+def masked_target_gain_db(est: np.ndarray, t: np.ndarray, ints: np.ndarray, m: np.ndarray) -> float:
+    """Ganho do alvo (dB) por projeção de mínimos quadrados SÓ nas amostras de `m` (trilhas: alvo e interferentes)."""
+    tracks = [t[m]] + [x[m] for x in ints]
+    return float(20 * np.log10(max(abs(lsq_coefs(est[m], tracks)[0]), 1e-4)))
+
+
+def frame_group_metrics(prefix: str, att: np.ndarray, m: np.ndarray, out: dict) -> None:
+    """Atenuação por quadro nos quadros de `m`: contagem, soma (para média ponderada) e ≥10/≥20 dB."""
+    a = att[m]
+    out[f"{prefix}_n"] = int(a.size)
+    out[f"{prefix}_att_sum"] = float(a.sum())
+    out[f"{prefix}_ge10"] = int((a >= 10).sum())
+    out[f"{prefix}_ge20"] = int((a >= 20).sum())
+
+
+ONSET_FRAMES = 10  # 100 ms
+
+
+def onset_metrics(nf: int, enh: np.ndarray, t: np.ndarray, ints: np.ndarray, tact: np.ndarray, out: dict) -> None:
+    """Início de trecho do alvo: quadro com alvo ativo e nenhum alvo ativo nos 100 ms anteriores (silêncio ou só-
+    interferente antes; o início do item não conta). Ganho do alvo por mínimos quadrados nos 100 ms seguintes (alvo e
+    interferentes como regressores), por início; `onset_gt3` = inícios atenuados > 3 dB; `onset_gain_sum` soma dos ganhos
+    (limitados a [-40, +10] dB)."""
+    n = hit = 0
+    tot = 0.0
+    for f in range(ONSET_FRAMES, nf - ONSET_FRAMES):
+        if tact[f] and not tact[f - ONSET_FRAMES : f].any():
+            m = np.zeros(len(t), bool)
+            m[f * tm.HOP : (f + ONSET_FRAMES) * tm.HOP] = True
+            g = masked_target_gain_db(enh, t, ints, m)
+            n += 1
+            hit += int(g < -3.0)
+            tot += float(np.clip(g, -40.0, 10.0))
+    out["onset_n"], out["onset_gt3"], out["onset_gain_sum"] = n, hit, tot
+
+
+def segment_metrics(view: str, nf: int, noisy: np.ndarray, enh: np.ndarray, t: np.ndarray, ints: np.ndarray,
+                    tact: np.ndarray, iact: np.ndarray, out: dict) -> None:
+    """Segmentos de 300 ms sem sobreposição. Só-interferente: sem alvo ativo e interferente ativo em >= 50% dos quadros
+    (na vista `int`, sem alvo na mistura, basta o interferente); atenuação = energia de entrada/saída do segmento
+    (conta `seg_oi_ge15`). Segmento com alvo: alvo ativo em >= 50% dos quadros; atenuação do alvo pelo ganho de mínimos
+    quadrados no segmento (alvo e interferentes como regressores), contado `seg_t_gt3` quando > 3 dB."""
+    e_in, e_out = frame_energy(noisy, nf), frame_energy(enh, nf)
+    n_oi = hit_oi = n_t = hit_t = 0
+    for k in range(nf // SEG_FRAMES):
+        sl = slice(k * SEG_FRAMES, (k + 1) * SEG_FRAMES)
+        has_t = view != "int" and tact[sl].mean() >= 0.5
+        if (view == "int" or not tact[sl].any()) and iact[sl].mean() >= 0.5:
+            n_oi += 1
+            hit_oi += int(att_db(e_in[sl].sum(), e_out[sl].sum()) >= 15.0)
+        elif has_t:
+            a, b = k * SEG_FRAMES * tm.HOP, (k + 1) * SEG_FRAMES * tm.HOP
+            m = np.zeros(len(t), bool)
+            m[a:b] = True
+            n_t += 1
+            hit_t += int(-masked_target_gain_db(enh, t, ints, m) > 3.0)
+    key = "io" if view == "int" else "oi"
+    out[f"seg_{key}_n"], out[f"seg_{key}_ge15"] = n_oi, hit_oi
+    if view != "int":
+        out["seg_t_n"], out["seg_t_gt3"] = n_t, hit_t
+
+
 def item_metrics(view: str, rec: dict, r: tm.Rendered, noisy: np.ndarray, enh: np.ndarray, stages: np.ndarray,
                  base: dict) -> dict:
     """Métricas de uma execução. `base`: STOI/ESTOI/SI-SDR da entrada (calculados uma vez por item)."""
@@ -166,6 +365,10 @@ def item_metrics(view: str, rec: dict, r: tm.Rendered, noisy: np.ndarray, enh: n
     if view == "int":
         e_in, e_out = float(np.sum(noisy.astype(np.float64) ** 2)), float(np.sum(enh.astype(np.float64) ** 2))
         out["leak_db"] = _db(e_out, e_in)
+        if n_int:
+            nfi = min(len(iact), len(noisy) // tm.HOP)
+            frame_group_metrics("io", att_db(frame_energy(noisy, nfi), frame_energy(enh, nfi)), iact[:nfi], out)
+            segment_metrics("int", nfi, noisy, enh, r.target, r.interf, tact, iact, out)
         return out
     t = r.target
     out["tgt_zero_pct"] = float(zero[:nf][tact].mean() * 100) if tact.any() else float("nan")
@@ -194,6 +397,28 @@ def item_metrics(view: str, rec: dict, r: tm.Rendered, noisy: np.ndarray, enh: n
                     out[f"{name}_zero_pct"] = float(zero[:nf][m].mean() * 100)
     else:
         out["target_gain_db"] = float(20 * np.log10(max(abs(lsq_coefs(enh, [t])[0]), 1e-4)))
+    # --- gating suave: quadros de alvo forte (>= -20 dB do máximo), sobreposição, só-interferente, segmentos de 300 ms
+    nf = min(len(st), len(r.tgt_act), len(t) // tm.HOP)
+    ints = r.interf
+    lv_t = tm.frame_db(t)[:nf]
+    hi = lv_t >= lv_t.max() - HI_REL_DB if nf else np.zeros(0, bool)
+    hi = hi & (lv_t > tm.VAD_FLOOR_DB) if nf else hi
+    if hi.sum() >= 5:
+        mh = frame_mask_samples(hi, len(t)).astype(bool)
+        out["target_gain_hi_db"] = masked_target_gain_db(enh, t, ints, mh)
+        out["d_sisdr_hi"] = si_sdr(enh[mh], t[mh]) - si_sdr(noisy[mh], t[mh])
+    if n_int:
+        both = tact[:nf] & iact[:nf]
+        if view == "mix" and both.sum() >= 20:
+            mb = frame_mask_samples(both, len(t)).astype(bool)
+            out["supp_overlap_db"], out["tgt_gain_overlap_db"] = interf_suppression_db(enh[mb], noisy[mb], t[mb], ints[:, mb])
+        if view == "mix":
+            e_in, e_out = frame_energy(noisy, nf), frame_energy(enh, nf)
+            only_i = iact[:nf] & ~tact[:nf]
+            if only_i.sum() >= 5:
+                frame_group_metrics("oi", att_db(e_in, e_out), only_i, out)
+    segment_metrics(view, nf, noisy, enh, t, ints, tact, iact, out)
+    onset_metrics(nf, enh, t, ints, tact, out)
     return out
 
 
