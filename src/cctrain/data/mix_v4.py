@@ -510,8 +510,10 @@ class StageV4Dataset(Dataset):
                 wet.append(_conv(x, h))
                 early.append(_conv(x, h_early))
             else:
+                # cópias distintas: os ganhos abaixo (`wet[k] *= g; early[k] *= g`) são in-place e, com o mesmo array
+                # nas duas listas, o interferente seco recebia g² (SIR efetivo 2t−2s−i em vez de s; bug até 3b36625)
                 wet.append(x)
-                early.append(x)
+                early.append(x.copy())
         # níveis relativos: SIR por interferente contra o nível ativo do alvo
         sirs = []
         if target_present:
