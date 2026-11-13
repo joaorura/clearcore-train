@@ -18,9 +18,10 @@
 # CPUs: EVAL_THREADS (2) para o avaliador; o resto dividido entre os ranks (1 processo de treino + workers de dados).
 set -euo pipefail
 W=/mnt/4tb-nvme/work/joaorura
-ROOT=$W/clearcore-train
+ROOT=$W/clearcore-train                   # clone principal: dados (data/) e manifests ignorados
+CODE="${CODE:-$W/clearcore-train-v5}"      # worktree do branch train/pro-v5-adapter (código)
 RUNS=$W/runs
-export CCTRAIN_ROOT=$ROOT CCTRAIN_WT=$ROOT
+export CCTRAIN_ROOT=$ROOT CCTRAIN_WT=$CODE
 export CCTRAIN_DATA_DIR=$ROOT/data CCTRAIN_RUNS_DIR=$RUNS
 export UV_PROJECT_ENVIRONMENT=$W/env
 export XDG_CACHE_HOME=$W/cache TORCH_HOME=$W/cache/torch MPLCONFIGDIR=$W/cache/mpl TMPDIR=$W/cache/tmp
@@ -39,7 +40,7 @@ if [ -z "${QUICK_EVAL:-}" ]; then
 fi
 CACHE="${QUICK_CACHE:-$RUNS/m4/pro-v42/quick-cache}"   # linhas de referência v3.1/DFNet3 (metas), compartilhado
 mkdir -p "$RUN_DIR"; rm -f "$RUN_DIR/TRAIN_DONE"
-cd "$ROOT"
+cd "$CODE"
 source scripts/env.sh 2>/dev/null || true
 echo "[$(date '+%F %T')] job ${SLURM_JOB_ID:-?} | GPUs $NG (${CUDA_VISIBLE_DEVICES:-?}) | CPUs $CPUS | workers/rank $WPR | commit $(git rev-parse --short HEAD) | run $RUN_DIR"
 
@@ -71,7 +72,7 @@ echo "[$(date '+%F %T')] treino saiu (rc=$rc); $(cat "$RUN_DIR/TRAIN_DONE" 2>/de
 
 # só roda o eval completo se o treino chegou ao fim (não em parada por sinal/tempo, que será retomada)
 if [ "$QUICK_EVAL" = 1 ] && grep -q '^total_steps' "$RUN_DIR/TRAIN_DONE" 2>/dev/null; then
-  sed -e "s#^ROOT=.*#ROOT=$ROOT#" -e "s#^WT=.*#WT=$ROOT#" -e "s#^PY=.*#PY=$PY#" scripts/after_train_eval_v42.sh \
+  sed -e "s#^ROOT=.*#ROOT=$ROOT#" -e "s#^WT=.*#WT=$CODE#" -e "s#^PY=.*#PY=$PY#" scripts/after_train_eval_v42.sh \
     >"$RUN_DIR/after_train_eval_rig.sh"
   TRAIN_PID=999999999 WATCH_PID="$WP" RUN_DIR="$RUN_DIR" EVAL_WORKERS=4 \
     bash "$RUN_DIR/after_train_eval_rig.sh" >"$RUN_DIR/after-train-eval.nohup" 2>&1 || true
