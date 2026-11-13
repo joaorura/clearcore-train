@@ -557,6 +557,10 @@ class StageV4Dataset(Dataset):
         i_act = np.zeros(frames, bool)
         for e in early[1:]:
             i_act |= rel_activity(e, frames)
+        # pro-v42: interferente com reverberação (trilha molhada), VAD a 45 dB do máximo (caudas)
+        i_act45 = np.zeros(frames, bool)
+        for k in range(n_int):
+            i_act45 |= rel_activity(wet[k + 1] * g * lim, frames, range_db=45.0)
         fms = np.mean(noisy32[: frames * HOP].reshape(frames, HOP).astype(np.float64) ** 2, axis=1)
         dsil = fms < SILENCE_MS
         max_freq = float(min(band, NYQUIST_HZ))
@@ -565,7 +569,7 @@ class StageV4Dataset(Dataset):
             "spec_clean": analysis((clean_all if mask0 else tgt).astype(np.float32)),
             "spec_interf": analysis(int_ref.astype(np.float32)),
             "embedding": emb, "mask": np.full(1, 0.0 if mask0 else 1.0, np.float32),
-            "target_active": t_act, "interf_active": i_act, "digital_silence": dsil,
+            "target_active": t_act, "interf_active": i_act, "interf_active_wet45": i_act45, "digital_silence": dsil,
             "n_interf": np.int64(n_int), "has_target": np.bool_(target_present),
             "max_freq": np.float32(max_freq), "level_db": np.float32(lvl_db),
             "sir_min_db": np.float32(min(sirs) if sirs else np.nan),

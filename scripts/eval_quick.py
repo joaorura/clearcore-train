@@ -170,9 +170,10 @@ def evaluate(ckpt: Path, step: int | None, cache: Path) -> dict:
         crit[v] = {k.split(" ")[0]: [bool(p), s] for k, (p, s) in res[v].items()}
     c = crit["cand_new"]
     u1 = eq.qagg(eq.pick(mrows, "cand_new", "mix", axis="user", n=1))
-    dmg = eq.paired(mrows, "cand_new", "cand_noprof", ["d_sisdr"], axis="user", n=0, noise="silent")["d_sisdr"]
+    pd = eq.paired(mrows, "cand_new", "cand_noprof", ["d_sisdr"], axis="user", n=0, noise="silent")
+    dmg, dmg_se = pd["d_sisdr"], pd["d_sisdr_se"]
     out = {"step": step, "ckpt": str(ckpt), "pass": sum(p for p, _ in c.values()), "n_crit": len(c),
-           "c6_db": u1["tonly_g_med"], "c1_db": dmg, "crit": c, "v31_crit": crit["v31_new"],
+           "c6_db": u1["tonly_g_med"], "c1_db": dmg, "c1_se": dmg_se, "crit": c, "v31_crit": crit["v31_new"],
            "bins": bins_summary(bins.get("cand", {})), "v31_bins": bins_summary(ref_bins.get("v31", {})),
            "sec": round(time.time() - t0, 1), "wall": time.strftime("%F %T")}
     return out
@@ -188,7 +189,7 @@ def better(a: dict, b: dict | None) -> bool:
 
 def line(r: dict) -> str:
     c = r["crit"]
-    return (f"passo {r['step']}: {r['pass']}/{r['n_crit']} PASS | C6 {r['c6_db']:+.1f} dB | C1 {r['c1_db']:+.2f} dB | "
+    return (f"passo {r['step']}: {r['pass']}/{r['n_crit']} PASS | C6 {r['c6_db']:+.1f} dB | C1 {r['c1_db']:+.2f}±{1.96 * r.get('c1_se', float('nan')):.2f} dB (IC95) | "
             + " ".join(f"{k}={'P' if p else 'F'}({s})" for k, (p, s) in c.items()) + f" | {r['sec']:.0f} s")
 
 

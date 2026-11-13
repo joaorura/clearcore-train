@@ -95,7 +95,7 @@ from df.loss import Istft  # noqa: E402
 from df.model import ModelParams  # noqa: E402
 
 GIB = 1024**3
-TERMS = ("mr", "os", "leak", "ovl", "guard", "lsnr", "turn", "n0", "l2sp", "pres", "wrec", "t", "df_reg")
+TERMS = ("mr", "os", "leak", "tail", "ovl", "guard", "lsnr", "turn", "n0g", "n0", "l2sp", "pres", "wrec", "t", "df_reg")
 FRAME_S = HOP / 48_000
 
 
@@ -128,7 +128,11 @@ def parse_args(argv=None):
     p.add_argument("--turn-hinge-db", type=float, default=-1.5)
     p.add_argument("--turn-boost", type=float, default=4.0, help="peso logo após o interferente parar")
     p.add_argument("--turn-decay-s", type=float, default=1.5)
-    p.add_argument("--lambda-n0", type=float, default=4000.0)
+    p.add_argument("--lambda-n0", type=float, default=0.0, help="L_n0 antigo (casar com a saída sem perfil)")
+    p.add_argument("--lambda-n0g", type=float, default=1.0, help="hinge no ganho do alvo-sombra em N=0 com perfil")
+    p.add_argument("--n0g-hinge-db", type=float, default=-1.0)
+    p.add_argument("--lambda-tail", type=float, default=7.5, help="L_leak extra na cauda (0–tail_s após o interferente)")
+    p.add_argument("--tail-s", type=float, default=1.5)
     p.add_argument("--guard-frac", type=float, default=0.12, help="fração-alvo de L_mr para o guard (λ adaptativo)")
     p.add_argument("--guard-lambda-min", type=float, default=1.0)
     p.add_argument("--guard-lambda-max", type=float, default=10.0)
@@ -250,6 +254,16 @@ def step_v42(model, ref, teacher, istft, df_params, hp: StageFHParams, b: dict, 
     turn, tst = turn_loss(shadow, spec_clean, valid, ta, ia, hinge_db=a.turn_hinge_db, boost=a.turn_boost,
                           decay_s=a.turn_decay_s)
 
+    # L_n0g: hinge no ganho do alvo-sombra em N=0 com perfil (mesma forma do L_turn, sem reforço temporal)
+    v0 = prof & (b["n_interf"] == 0)[:, None] & b["has_target"][:, None] & ta & ~ds
+    n0g, n0st = turn_loss(shadow, spec_clean, v0, ta, torch.zeros_like(ia), hinge_db=a.n0g_hinge_db, boost=1.0,
+                          decay_s=1.0)
+    # L_tail: vazamento na cauda do interferente (0–tail_s depois do fim, VAD pico−45 na trilha com reverberação)
+    iw = b["interf_active_wet45"][:, :T]
+    since_i = since_interferer_s(ia)
+    f_tail = (prof & ~ta & ~ia & iw & ~ds & (since_i <= a.tail_s)).float()
+    tail = leak_loss(out, spec, f_tail)
+
     # L_n0 e L_guard: N=0 com perfil
     idx_g = (profile & (b["n_interf"] == 0) & b["has_target"]).nonzero(as_tuple=True)[0]
     if idx_g.numel():
@@ -304,6 +318,7 @@ def step_v42(model, ref, teacher, istft, df_params, hp: StageFHParams, b: dict, 
 
     parts = {"mr": mr, "os": os_, "leak": a.lambda_leak * leak, "ovl": a.lambda_ovl * ovl,
              "guard": lam_guard * guard, "lsnr": ls, "turn": a.lambda_turn * turn, "n0": a.lambda_n0 * n0,
+             "n0g": a.lambda_n0g * n0g, "tail": a.lambda_tail * tail,
              "l2sp": a.lambda_sp * l2sp, "pres": a.lambda_pres * pres, "wrec": a.lambda_wrec * wrec, "t": t,
              "df_reg": l_df}
     total = sum(parts.values())
@@ -311,7 +326,8 @@ def step_v42(model, ref, teacher, istft, df_params, hp: StageFHParams, b: dict, 
         oi = f_leak.bool()
         stats = {
             "raw_leak": leak.detach(), "raw_ovl": ovl.detach(), "raw_guard": guard.detach(), "raw_turn": turn.detach(),
-            "raw_n0": n0.detach(), "raw_l2sp": l2sp.detach() if torch.is_tensor(l2sp) else torch.tensor(0.0),
+            "raw_n0": n0.detach(), "raw_n0g": n0g.detach(), "raw_tail": tail.detach(),
+            "g_n0_db": n0st["g_turn_db"].to(spec.device), "n_tail": f_tail.sum(), "raw_l2sp": l2sp.detach() if torch.is_tensor(l2sp) else torch.tensor(0.0),
             "lam_guard": torch.tensor(lam_guard), "guard_gap_db": guard_gap,
             "g_turn_db": tst["g_turn_db"].to(spec.device), "g_turn_early_db": tst["g_turn_early_db"].to(spec.device),
             "n_turn": tst["n_turn"],
@@ -385,7 +401,7 @@ def main():
     hashed = {"v4": vp.hashable(), "lr": a.lr, "wd": a.weight_decay, "warmup": a.warmup, "total_steps": a.total_steps,
               "batch": a.batch_size,
               "lambdas": [a.lambda_leak, a.lambda_ovl, a.lambda_turn, a.lambda_n0, a.lambda_sp, a.lambda_pres,
-                          a.lambda_wrec, a.lsnr_factor],
+                          a.lambda_wrec, a.lsnr_factor, a.lambda_n0g, a.n0g_hinge_db, a.lambda_tail, a.tail_s],
               "turn": [a.turn_hinge_db, a.turn_boost, a.turn_decay_s],
               "guard": [a.guard_frac, a.guard_lambda_min, a.guard_lambda_max, a.guard_margin],
               "fw": a.formant_weight, "guard_ckpt": str(guard_ck), "init": str(init), "v42": 1}
@@ -526,7 +542,7 @@ def main():
                 eta = f" | até stop-at: {(deadline - time.time()) / 3600:.2f} h" if deadline else ""
                 log(f"passo {step}/{end_step} total={row['total']:.3f} mr={row['mr']:.3f} "
                     f"s/passo={sps:.3f} espera={statistics.median(waits):.3f} lr={sched.get_last_lr()[0]:.2e} "
-                    f"gTurn={row['g_turn_db']:+.1f} gTurn0.5={row['g_turn_early_db']:+.1f} "
+                    f"gTurn={row['g_turn_db']:+.1f} gTurn0.5={row['g_turn_early_db']:+.1f} gN0={row['g_n0_db']:+.1f} "
                     f"zeroOI={row['zero_frac_only_interf']:.2f} zeroT={row['zero_frac_target']:.3f} "
                     f"gap={row['guard_gap_db']:+.2f} λg={row['lam_guard']:.1f} l2sp={row['raw_l2sp']:.2f} "
                     f"| rel: {rel} | pss={pss_max / GIB:.1f} GiB{eta}")
