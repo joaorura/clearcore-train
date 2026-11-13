@@ -448,6 +448,18 @@ def quality_metrics(view: str, r: tm.Rendered, noisy: np.ndarray, enh: np.ndarra
     out["q_long_frames"] = d["long_frames"]
     for k in ("med", "p10", "std", "dstep"):
         out[f"q_g_{k}"] = d[k]
+    if r.interf.shape[0]:
+        # quadros ativos do alvo SEM interferente ativo (alvo sozinho) e COM interferente (sobreposição)
+        drop_f = np.zeros(nf, bool)
+        for a, b, _ in d["events"]:
+            drop_f[a:b] = True
+        for key, m in (("tonly", act & ~r.int_act[:nf]), ("both", act & r.int_act[:nf])):
+            if m.sum() >= 10:
+                out[f"q_{key}_frames"] = int(m.sum())
+                out[f"q_{key}_g_med"] = float(np.median(g[m]))
+                out[f"q_{key}_g_p10"] = float(np.percentile(g[m], 10))
+                out[f"q_{key}_drop_frames"] = int((drop_f & m).sum())
+                out[f"q_{key}_low10_frames"] = int((g[m] <= -10.0).sum())
     ms = frame_mask_samples(act, len(t)).astype(bool)
     if ms.sum() >= tm.SR:  # >= 1 s de fala ativa concatenada
         e_out = float(stoi(enh[ms], t[ms], tm.SR, extended=True)[0])

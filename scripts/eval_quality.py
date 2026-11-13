@@ -232,6 +232,12 @@ def qagg(rs: list[dict]) -> dict:
          "drop_pct": 100 * _sum(rs, "q_drop_frames") / act if act else float("nan"),
          "long_pct": 100 * _sum(rs, "q_long_frames") / act if act else float("nan"),
          "drop_dur_ms": 1000 * FRAME_S * _sum(rs, "q_drop_frames") / nd if nd else float("nan")}
+    for key in ("tonly", "both"):
+        fr = _sum(rs, f"q_{key}_frames")
+        a[f"{key}_drop_pct"] = 100 * _sum(rs, f"q_{key}_drop_frames") / fr if fr else float("nan")
+        a[f"{key}_low10_pct"] = 100 * _sum(rs, f"q_{key}_low10_frames") / fr if fr else float("nan")
+        a[f"{key}_g_med"] = _m(rs, f"q_{key}_g_med")
+        a[f"{key}_g_p10"] = _m(rs, f"q_{key}_g_p10")
     for k in ("q_g_p10", "q_g_med", "q_g_std", "q_g_dstep", "d_estoi_act", "estoi_act", "d_estoi", "d_stoi", "d_sisdr",
               "dnsmos_sig", "dnsmos_bak", "dnsmos_ovrl", "n_att_sil_mean", "n_att_sil_p10", "n_att_speech",
               "snr_out_speech", "snr_in_speech", "target_gain_hi_db", "interf_supp_db"):
@@ -303,36 +309,41 @@ MAIN_GROUPS = [
 
 
 def criteria(rows: list[dict], nrows: list[dict] | None) -> tuple[list[str], dict]:
-    """PASS/FAIL por variante com perfil. Limiares em `CRIT` (justificativa no relatório)."""
+    """PASS/FAIL por variante com perfil (justificativa dos limiares em `CRIT_NOTES`)."""
     res: dict = {}
-    u0 = dict(axis="user", n=0)
+    u0s = dict(axis="user", n=0, noise="silent")
     u1 = dict(axis="user", n=1)
     v31_u1 = qagg(pick(rows, "v31_new", "mix", **u1))
     for v in PROF:
         mk = MODEL_OF[v]
         c = {}
-        dmg = paired(rows, v, f"{mk}_noprof", ["d_sisdr"], axis="user", n=0, noise="silent")["d_sisdr"]
-        c["C1 dano N=0 usuário silencioso (ΔSI-SDR perfil−sem) ≥ −1 dB"] = (dmg >= -1.0, f"{dmg:+.2f} dB")
-        a0, b0 = qagg(pick(rows, v, "mix", **u0)), qagg(pick(rows, f"{mk}_noprof", "noprof", **u0))
-        c["C2 dropouts/min N=0 usuário ≤ sem perfil + 1"] = (a0["drop_per_min"] <= b0["drop_per_min"] + 1.0,
-                                                             f"{a0['drop_per_min']:.1f} vs {b0['drop_per_min']:.1f}+1")
-        c["C3 p10 ganho N=0 usuário ≥ sem perfil − 3 dB"] = (a0["q_g_p10"] >= b0["q_g_p10"] - 3.0,
-                                                           f"{a0['q_g_p10']:+.1f} vs {b0['q_g_p10']:+.1f}−3")
+        dmg = paired(rows, v, f"{mk}_noprof", ["d_sisdr"], **u0s)["d_sisdr"]
+        c["C1 dano N=0 usuário silencioso: ΔSI-SDR(perfil) − ΔSI-SDR(sem) ≥ −1 dB"] = (dmg >= -1.0, f"{dmg:+.2f} dB")
+        a0, b0 = qagg(pick(rows, v, "mix", **u0s)), qagg(pick(rows, f"{mk}_noprof", "noprof", **u0s))
+        c["C2 dropouts/min N=0 usuário silencioso ≤ 1,5 × sem perfil"] = (
+            a0["drop_per_min"] <= 1.5 * b0["drop_per_min"], f"{a0['drop_per_min']:.0f} vs 1,5×{b0['drop_per_min']:.0f}")
+        c["C3 p10 do ganho N=0 usuário silencioso ≥ sem perfil − 3 dB"] = (
+            a0["q_g_p10"] >= b0["q_g_p10"] - 3.0, f"{a0['q_g_p10']:+.1f} vs {b0['q_g_p10']:+.1f}")
+        tot0 = a0["drop_pct"] + a0["long_pct"]
+        c["C4 % fala em dropout + supressão longa N=0 usuário silencioso ≤ 5%"] = (tot0 <= 5.0, f"{tot0:.1f}%")
         a1 = qagg(pick(rows, v, "mix", **u1))
-        c["C4 dropouts/min N=1 usuário ≤ v31 + 1"] = (a1["drop_per_min"] <= v31_u1["drop_per_min"] + 1.0,
-                                                      f"{a1['drop_per_min']:.1f} vs {v31_u1['drop_per_min']:.1f}+1")
-        c["C5 % fala em dropout N=1 usuário ≤ 5%"] = (a1["drop_pct"] <= 5.0, f"{a1['drop_pct']:.1f}%")
-        c["C6 ΔESTOI ativo N=1 usuário ≥ v31 − 0,01"] = (a1["d_estoi_act"] >= v31_u1["d_estoi_act"] - 0.01,
-                                                        f"{a1['d_estoi_act']:+.3f} vs {v31_u1['d_estoi_act']:+.3f}")
+        c["C5 dropouts/min N=1 usuário ≤ v31 × 1,1"] = (a1["drop_per_min"] <= 1.1 * v31_u1["drop_per_min"],
+                                                       f"{a1['drop_per_min']:.0f} vs 1,1×{v31_u1['drop_per_min']:.0f}")
+        c["C6 mediana do ganho do alvo sozinho N=1 usuário ≥ −3 dB"] = (
+            a1["tonly_g_med"] >= -3.0, f"{a1['tonly_g_med']:+.1f} dB")
+        c["C7 ΔESTOI ativo N=1 usuário ≥ max(v31 − 0,01; 0)"] = (
+            a1["d_estoi_act"] >= max(v31_u1["d_estoi_act"] - 0.01, 0.0), f"{a1['d_estoi_act']:+.3f} vs {v31_u1['d_estoi_act']:+.3f}")
         s = seg_io(rows, v, axis="user", n=(1, 2, 3, 4))
-        c["C7 seg só-int ≥15 dB (usuário N=1..4, vista int) ≥ 90%"] = (s >= 90.0, f"{s:.0f}%")
+        c["C8 seg só-int ≥15 dB (usuário N=1..4, vista int) ≥ 90%"] = (s >= 90.0, f"{s:.0f}%")
         if nrows:
             for snr in NOISE_SNRS:
                 sel = dict(axis="noise", noise=f"snr{snr:.0f}")
-                a, ref = qagg(pick(nrows, v, "mix", **sel)), qagg(pick(nrows, "v2_current", "mix", **sel))
-                c[f"R{snr:.0f} ruído SNR {snr:.0f}: ΔSI-SDR e atenuação (silêncio) ≥ v2_current − 1 dB"] = (
-                    a["d_sisdr"] >= ref["d_sisdr"] - 1 and a["n_att_sil_mean"] >= ref["n_att_sil_mean"] - 1,
-                    f"{a['d_sisdr']:+.1f}/{a['n_att_sil_mean']:.1f} vs {ref['d_sisdr']:+.1f}/{ref['n_att_sil_mean']:.1f}")
+                a, ref = qagg(pick(nrows, v, "mix", **sel)), qagg(pick(nrows, "dfn3_noprof", "noprof", **sel))
+                c[f"R{snr:.0f} ruído SNR {snr:.0f}: ΔSI-SDR e atenuação no silêncio ≥ DFNet3 publicado − 1 dB; ΔESTOI ativo ≥ −0,01"] = (
+                    a["d_sisdr"] >= ref["d_sisdr"] - 1 and a["n_att_sil_mean"] >= ref["n_att_sil_mean"] - 1
+                    and a["d_estoi_act"] >= -0.01,
+                    f"{a['d_sisdr']:+.1f}/{a['n_att_sil_mean']:.0f}/{a['d_estoi_act']:+.3f} vs "
+                    f"{ref['d_sisdr']:+.1f}/{ref['n_att_sil_mean']:.0f}")
         res[v] = c
     names = list(next(iter(res.values())).keys())
     L = ["| critério | " + " | ".join(PROF) + " |", "|---|" + "---|" * len(PROF)]
@@ -340,6 +351,28 @@ def criteria(rows: list[dict], nrows: list[dict] | None) -> tuple[list[str], dic
         L.append(f"| {n} | " + " | ".join(f"{'PASS' if res[v][n][0] else 'FAIL'} ({res[v][n][1]})" for v in PROF) + " |")
     L.append("| **total** | " + " | ".join(f"{sum(x[0] for x in res[v].values())}/{len(names)}" for v in PROF) + " |")
     return L, res
+
+
+CRIT_NOTES = [
+    "Por que estes limiares (ajustados depois da linha de base desta rodada):",
+    "",
+    "- **Ruído de medida**: cada recorte do usuário tem 12 itens ≈ 0,7 min de fala; ~30–40 dropouts por recorte dão erro "
+    "de Poisson de ~±8/min. Por isso os critérios de contagem são relativos (× 1,5 sem perfil; × 1,1 v31) e não \"+1\", que "
+    "fica abaixo do ruído.",
+    "- **Sem perfil já tem dropouts** (≈40/min no usuário silencioso, ≈180/min em SNR 5): o DFNet3 atenua sílabas fracas "
+    "e consoantes sob ruído. O piso é o modelo sem perfil do mesmo checkpoint; o critério mede o que o PERFIL acrescenta.",
+    "- **C1/C3/C4 só no silencioso**: em SNR 5 a diferença perfil−sem mistura o que o denoiser faz; o dano do perfil "
+    "aparece limpo no silencioso. −1 dB (C1) e −3 dB de p10 (C3) ≈ o que o v31 já atinge (−0,6 dB; −2,1 dB) com folga de "
+    "medida; 5% de fala cortada (C4) ≈ 1 corte de 100 ms a cada 2 s de fala.",
+    "- **C6 (alvo sozinho em N=1)**: quadros do alvo sem interferente ativo, numa mistura com interferente. Sem perfil a "
+    "mediana do ganho é ≈ −0,3 dB; −3 dB é atenuação já perceptível. Mede o \"picote\" do usuário falando sozinho numa "
+    "conversa, que dropouts/min sozinho não separa (com mediana < −10 dB quase tudo vira supressão longa).",
+    "- **C7**: inteligibilidade nas regiões ativas não pode cair em relação à entrada (≥ 0) nem ficar mais de 0,01 abaixo "
+    "do v31. **C8**: limiar do pedido (90%).",
+    "- **R0/R5/R10 (ruído)**: referência = DFNet3 publicado (`dfn3_noprof`), o denoiser de origem, em vez de v2_current: o "
+    "v2_current zera quadros (gating atual) e infla a atenuação no silêncio (57 dB) com ΔESTOI ativo negativo, o que "
+    "não é \"boa remoção de ruído\". ΔESTOI ativo ≥ −0,01: o denoise não pode custar inteligibilidade.",
+]
 
 
 def build_report(out: Path) -> str:
@@ -380,13 +413,22 @@ def build_report(out: Path) -> str:
           ""]
     L += ["## Critérios de aceitação", ""]
     cl, _ = criteria(rows, nrows)
-    L += cl + [""]
+    L += cl + [""] + CRIT_NOTES + [""]
     for title, sel in MAIN_GROUPS:
         L += [f"## {title}", "", QHDR]
         for name, v, view in variant_rows(rows, **sel):
             rs = pick(rows, v, view, **sel)
             if rs:
                 L.append(qline(name, qagg(rs)))
+        if sel.get("n") != 0:
+            L += ["", "Alvo sozinho (quadros ativos sem interferente) vs. sobreposição (com interferente): mediana do ganho / "
+                  "p10 / % em dropout / % com ganho ≤ −10 dB", "",
+                  "| variante | alvo sozinho | sobreposição |", "|---|---|---|"]
+            for name, v, view in variant_rows(rows, **sel):
+                a = qagg(pick(rows, v, view, **sel))
+                L.append(f"| {name} | " + " | ".join(
+                    f"{f(a[k + '_g_med'], '{:+.1f}')} / {f(a[k + '_g_p10'], '{:+.1f}')} / {f(a[k + '_drop_pct'], '{:.1f}')} / "
+                    f"{f(a[k + '_low10_pct'], '{:.1f}')}" for k in ("tonly", "both")) + " |")
         if sel.get("n") != 0 and sel.get("axis") != "temporal":
             L.append("")
             L.append("seg só-int ≥15 dB (vista int): " + ", ".join(f"{v} {f(seg_io(rows, v, **sel), '{:.0f}')}%" for v in PROF))
