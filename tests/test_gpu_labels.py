@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 import torch
 
-from cctrain.data import labels as L
+from cctrain.data.gpu import labels as L
 from cctrain.data import mix_v4 as C
 
 HOP = C.HOP
