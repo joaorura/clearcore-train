@@ -18,7 +18,6 @@ para propagar o estado), em vez de um laço por quadro.
 
 from __future__ import annotations
 
-import math
 from functools import lru_cache
 
 import numpy as np
