@@ -48,6 +48,9 @@ def parse():
     p.add_argument("--n-batches", type=int, default=4)
     p.add_argument("--off-every", type=int, default=0, help="1 a cada N lotes sem perfil (0 = todos com perfil)")
     p.add_argument("--parity-steps", type=int, default=20)
+    p.add_argument("--parity-batch", type=int, default=16,
+                   help="paridade num recorte do lote (referência + variante no mesmo passo não cabem em 24 GB com B48 "
+                        "e um CUDA Graph); 0 = lote inteiro")
     p.add_argument("--warm", type=int, default=5)
     p.add_argument("--steps", type=int, default=30)
     p.add_argument("--variants", default="ref,ref-nolog,sf")
@@ -142,13 +145,24 @@ def main():
                 p.copy_(x)
         okw = {"fused": True} if "fused" in opts else ({"foreach": True} if "foreach" in opts else {})
         opt = torch.optim.AdamW(trainable, lr=lr, weight_decay=ta.weight_decay, **okw)
-        runner = None
         eager_fn = T.step_v5 if base.startswith("fl") else T.step_v5_ref
-        if base not in ("ref", "ref-nolog", "fl", "fl-nolog"):
+
+        def make_runner():
+            if base in ("ref", "ref-nolog", "fl", "fl-nolog"):
+                return None
             mode = {"sf": "eager", "graph": "graph"}.get(base, "compile")
             cm = {"c-default": "default", "c-ro": "reduce-overhead", "c-mat": "max-autotune-no-cudagraphs"}.get(base)
-            runner = StepRunner(model, istft, params, hp, ta, amp, trainable, mode=mode, compile_mode=cm,
-                                loss_fn=T.step_v5 if "fl" in opts else None)
+            return StepRunner(model, istft, params, hp, ta, amp, trainable, mode=mode, compile_mode=cm,
+                              loss_fn=T.step_v5 if "fl" in opts else None)
+
+        runner = make_runner()
+        pb = a.parity_batch
+
+        def cut(b):
+            if not pb:
+                return b
+            return {k: (v[:pb] if torch.is_tensor(v) and v.dim() and v.shape[0] == ta.global_batch else v)
+                    for k, v in b.items()}
         per_step_sync = base in ("ref", "fl")
 
         def setup(on_variant: bool):
@@ -188,6 +202,7 @@ def main():
         tc = time.time()
         for i in range(a.parity_steps):
             b, on = batches[i % len(batches)]
+            b = cut(b)
             setup(False)
             lr_, gr_ = ref_grads(b)
             setup(True)
@@ -217,7 +232,18 @@ def main():
         res.update({"loss_rel_max": max(lrel), "grad_rel_max": max(grel), "grad_rel_med": statistics.median(grel),
                     "upd_rel_max": max(prel), "part_rel_max": {k: float(f"{v:.1e}") for k, v in part_rel.items()}, "loss_rel": [float(f"{x:.2e}") for x in lrel],
                     "grad_rel": [float(f"{x:.2e}") for x in grel]})
-        del opt_ref, shadow
+        del opt_ref, shadow, parts, gv, gr_
+        for p in trainable:
+            p.grad = None
+        if base.startswith("c-") or "lc" in opts:
+            torch._dynamo.reset()
+            fv5.set_compile("lc" in opts)
+        runner = None
+        import gc
+
+        gc.collect()
+        torch.cuda.empty_cache()
+        runner = make_runner()
         # tempo: a partir do estado inicial, trajetória própria
         setup(True)
         with torch.no_grad():

@@ -380,6 +380,8 @@ class StepRunner:
             torch.cuda.current_stream().wait_stream(s)
             for p in self.trainable:
                 p.grad = None
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()  # devolve o cache do caminho eager: o pool do grafo guarda todas as ativações
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph, capture_error_mode="thread_local"):  # thread do pin_memory
                 parts = self._loss(static_b)
