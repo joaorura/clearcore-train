@@ -310,8 +310,8 @@ class StepRunner:
     "graph" (CUDA Graph manual de forward+perdas+backward, um grafo por estado de perfil; entradas estáticas).
     O otimizador, o clip e o scheduler ficam fora (o chamador)."""
 
-    def __init__(self, model, istft, df_params, hp, a, amp: bool, trainable: list, mode: str = "eager",
-                 compile_mode: str | None = None, warmup: int = 3):
+    def __init__(self, model, istft, df_params, hp, a, amp, trainable: list, mode: str = "eager",
+                 compile_mode: str | None = None, warmup: int = 3, loss_fn=None):
         self.model, self.istft, self.df_params, self.hp, self.a, self.amp = model, istft, df_params, hp, a, amp
         self.trainable = trainable
         self.mode = mode
@@ -319,6 +319,10 @@ class StepRunner:
         self.istft = IstftSF(istft).to(next(model.parameters()).device)
         self.warmup = warmup
         self.gate = getattr(model, "adapter_gate", None)
+        # loss_fn(model, istft, df_params, hp, b, a, amp) -> parts: padrão step_v5_sf; o train passa o step_v5 do
+        # perf/v5-loss (perdas fast). Precisa ser sem sync para graph/compile reduce-overhead.
+        self.loss_fn = loss_fn or step_v5_sf
+        self.compile_mode = compile_mode
         self._fn = self._loss
         if mode == "compile":
             kw = {"mode": compile_mode} if compile_mode and compile_mode != "default" else {}
@@ -326,7 +330,7 @@ class StepRunner:
         self.graphs: dict = {}
 
     def _loss(self, b: dict) -> dict:
-        return step_v5_sf(self.model, self.istft, self.df_params, self.hp, b, self.a, self.amp)
+        return self.loss_fn(self.model, self.istft, self.df_params, self.hp, b, self.a, self.amp)
 
     def _set_static(self, on: bool | None) -> None:
         if self.gate is not None:
@@ -339,6 +343,8 @@ class StepRunner:
         try:
             for p in self.trainable:
                 p.grad = None
+            if self.mode == "compile" and self.compile_mode in ("reduce-overhead", "max-autotune"):
+                torch.compiler.cudagraph_mark_step_begin()
             parts = self._fn(b)
             parts["total"].backward()
         finally:

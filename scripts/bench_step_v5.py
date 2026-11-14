@@ -7,8 +7,10 @@ gradientes (antes do clip) para comparar com a referência (caminho atual de tra
 passos cronometrados (sync só no fim; a variante "ref" faz os syncs do laço atual a cada passo).
 
 Variantes (--variants, separadas por vírgula; '+' combina opções):
-  ref                 step_v5 atual + syncs por passo do laço (finite.item, synchronize, float das perdas), AdamW padrão
-  ref-nolog           step_v5 atual, sem os syncs do laço (perdas lidas só no fim)
+  ref                 step_v5_ref (perdas antigas) + syncs por passo do laço (finite.item, synchronize, float), AdamW padrão
+  ref-nolog           idem, sem os syncs do laço (perdas lidas só no fim)
+  fl / fl-nolog       step_v5 (perdas fast do perf/v5-loss, gate dinâmico) com / sem os syncs do laço
+  +fl / +lc           (sf/graph/c-*) perdas fast do perf/v5-loss no StepRunner / --loss-compile
   sf                  step_v5_sf (sem sync) + gate estático
   bench / fused / foreach / cl / zg  cudnn.benchmark / AdamW fused / foreach / channels_last / zero_grad(set_to_none=False)
   graph               CUDA Graph manual de forward+perdas+backward (implica sf)
@@ -119,7 +121,7 @@ def main():
         """Referência no estado atual: step_v5 eager, AdamW padrão, cudnn.benchmark off, layout contíguo."""
         for p in trainable:
             p.grad = None
-        parts = T.step_v5(model, istft, params, hp, b, ta, amp)
+        parts = T.step_v5_ref(model, istft, params, hp, b, ta, amp)
         parts["total"].backward()
         return ({k: float(v.detach()) for k, v in parts.items()},
                 [None if p.grad is None else p.grad.detach().clone() for p in trainable])
@@ -130,18 +132,24 @@ def main():
 
     def run_variant(name: str) -> dict:
         opts = set(name.split("+"))
-        base = next(iter(opts & {"ref", "ref-nolog", "sf", "graph", "c-default", "c-ro", "c-mat"}), "sf")
+        base = next(iter(opts & {"ref", "ref-nolog", "fl", "fl-nolog", "sf", "graph", "c-default", "c-ro", "c-mat"}),
+                    "sf")
+        import cctrain.losses.fast_v5 as fv5
+
+        fv5.set_compile("lc" in opts)
         with torch.no_grad():
             for p, x in zip(trainable, init):
                 p.copy_(x)
         okw = {"fused": True} if "fused" in opts else ({"foreach": True} if "foreach" in opts else {})
         opt = torch.optim.AdamW(trainable, lr=lr, weight_decay=ta.weight_decay, **okw)
         runner = None
-        if base not in ("ref", "ref-nolog"):
+        eager_fn = T.step_v5 if base.startswith("fl") else T.step_v5_ref
+        if base not in ("ref", "ref-nolog", "fl", "fl-nolog"):
             mode = {"sf": "eager", "graph": "graph"}.get(base, "compile")
             cm = {"c-default": "default", "c-ro": "reduce-overhead", "c-mat": "max-autotune-no-cudagraphs"}.get(base)
-            runner = StepRunner(model, istft, params, hp, ta, amp, trainable, mode=mode, compile_mode=cm)
-        per_step_sync = base == "ref"
+            runner = StepRunner(model, istft, params, hp, ta, amp, trainable, mode=mode, compile_mode=cm,
+                                loss_fn=T.step_v5 if "fl" in opts else None)
+        per_step_sync = base in ("ref", "fl")
 
         def setup(on_variant: bool):
             torch.backends.cudnn.benchmark = on_variant and "bench" in opts
@@ -151,7 +159,7 @@ def main():
         def one(b, on):
             if runner is None:
                 opt.zero_grad(set_to_none="zg" not in opts)
-                parts = T.step_v5(model, istft, params, hp, b, ta, amp)
+                parts = eager_fn(model, istft, params, hp, b, ta, amp)
                 tot = parts["total"]
                 if per_step_sync:
                     if torch.isfinite(tot).float().item() < 1:
@@ -229,8 +237,9 @@ def main():
         res["s_per_step"] = (time.perf_counter() - t1) / a.steps
         res["vram_gb"] = torch.cuda.max_memory_reserved() / 1024**3
         setup(False)
-        if base.startswith("c-"):
+        if base.startswith("c-") or "lc" in opts:
             torch._dynamo.reset()
+        fv5.set_compile(False)
         del runner, opt
         torch.cuda.empty_cache()
         return res
