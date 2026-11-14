@@ -126,7 +126,7 @@ class StageV4RecipeDataset(StageV4Dataset):
         if mode != "snr":
             pink = bool(rng.random() < 0.5)
             floor_white = rng.standard_normal(n).astype(np.float32)  # pink_noise() sorteia o mesmo branco
-        mask0 = bool(rng.random() < p.p_drop)
+        mask0 = self._mask0(i, bool(rng.random() < p.p_drop))
         exclude = (trec[0],) + self.pools.heldout_enroll
         if self.provenance:
             emb = np.asarray(self.bank.sample(tkey, rng, exclude_utterances=exclude,

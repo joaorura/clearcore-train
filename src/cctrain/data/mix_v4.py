@@ -419,6 +419,17 @@ class StageV4Dataset(Dataset):
         self.length = length if length is not None else p.total_steps * p.batch_size
         self.provenance = bool(getattr(bank, "has_provenance", False))
         self._rir_cache: dict[str, tuple[np.ndarray, np.ndarray]] | None = None
+        self.drop_block = 0  # > 0: descarte de perfil por bloco de `drop_block` índices consecutivos (ver _mask0)
+
+    def _mask0(self, i: int, drawn: bool) -> bool:
+        """Descarte de perfil (mask0). Padrão: o sorteio por amostra (`drawn`, já consumido do rng). Com
+        `drop_block = b > 0` (o lote por rank do treino): todas as amostras de índices i // b iguais (o mesmo lote de um
+        rank, pela ordem do sampler) recebem a mesma decisão, de um rng próprio — lotes homogêneos (todos com ou todos
+        sem perfil), a mesma fração p_drop em média, e o resto do sorteio da amostra inalterado."""
+        if self.drop_block <= 0:
+            return drawn
+        r = np.random.default_rng([int(self.p.seed), 0xD5, int(i) // int(self.drop_block)]).random()
+        return bool(r < self.p.p_drop)
 
     def __getstate__(self) -> dict:
         # o cache de RIRs (≈43 MB f32) é por processo: nunca viaja no pickle (spawn/forkserver), cada worker monta o seu
@@ -577,7 +588,7 @@ class StageV4Dataset(Dataset):
         tgt = early[0]
         int_ref = np.sum(early[1:], axis=0) if n_int else np.zeros(n)
         clean_all = tgt + int_ref
-        mask0 = bool(rng.random() < p.p_drop)
+        mask0 = self._mask0(i, bool(rng.random() < p.p_drop))
         exclude = (trec[0],) + self.pools.heldout_enroll
         if self.provenance:
             emb = np.asarray(self.bank.sample(tkey, rng, exclude_utterances=exclude,

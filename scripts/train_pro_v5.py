@@ -115,8 +115,24 @@ def parse_args(argv=None):
     p.add_argument("--lr-scale", choices=("sqrt", "none"), default="sqrt")
     p.add_argument("--weight-decay", type=float, default=0.0)
     p.add_argument("--grad-clip", type=float, default=None, help="padrão: o do stage F")
-    p.add_argument("--amp", choices=("bf16", "none"), default="bf16")
+    p.add_argument("--amp", choices=("bf16", "fp16", "none"), default="bf16",
+                   help="autocast do forward; fp16 usa GradScaler (perdas, STFT/iSTFT e parte espectral em fp32)")
+    p.add_argument("--gru-fp32", action="store_true",
+                   help="GRUs em fp32 mesmo com autocast (o autocast do cuDNN RNN roda a GRU em fp16, também no bf16)")
+    p.add_argument("--p-drop", type=float, default=None,
+                   help="fração de amostras sem perfil (padrão: o do V4Params, 0,15). Com a base congelada, amostra sem "
+                        "perfil tem gradiente exatamente 0 em todos os treináveis: --p-drop 0 só elimina custo")
+    p.add_argument("--profile-drop-mode", choices=("sample", "batch"), default="sample",
+                   help="descarte de perfil (p_drop): por amostra (padrão) ou por lote de cada rank (lotes homogêneos: a "
+                        "LoRAGRU faz 1 chamada do cuDNN em vez de 2; muda os dados, entra no hash)")
+    p.add_argument("--skip-off-batches", action="store_true",
+                   help="com --profile-drop-mode batch: lote todo sem perfil pula forward/perdas (grad 0 exato; o "
+                        "otimizador ainda dá o passo); sem linha de log nesses passos")
+    p.add_argument("--lora-gru-fused", action="store_true",
+                   help="LoRAGRU com lote misto em UMA chamada do cuDNN (hidden 2H bloco-diagonal); ~1 ulp, só treino")
     p.add_argument("--compile", action="store_true", help="torch.compile nos decoders (experimental)")
+    p.add_argument("--compile-mode", default=None,
+                   help="modo do torch.compile (ex. reduce-overhead = CUDA Graphs); implica --compile")
     p.add_argument("--segment-s", type=float, default=6.0)
     p.add_argument("--workers", type=int, default=None, help="por rank; padrão CPUs/rank − 1")
     p.add_argument("--prefetch", type=int, default=4)
@@ -156,9 +172,10 @@ def parse_args(argv=None):
                    help="passo sem sync do host (cctrain.train.v5_fast.step_v5_sf; gate estático em lote homogêneo)")
     p.add_argument("--step-mode", choices=("eager", "graph", "compile"), default="eager",
                    help="graph = CUDA Graph de forward+perdas+backward por estado de perfil; compile = torch.compile do "
-                        "forward+perdas (--compile-mode). graph/compile implicam --sync-free")
-    p.add_argument("--compile-mode", default="default",
-                   choices=("default", "reduce-overhead", "max-autotune-no-cudagraphs", "max-autotune"))
+                        "forward+perdas (--step-compile-mode). graph/compile implicam --sync-free")
+    p.add_argument("--step-compile-mode", default="default",
+                   choices=("default", "reduce-overhead", "max-autotune-no-cudagraphs", "max-autotune"),
+                   help="modo do torch.compile de --step-mode compile (o --compile-mode compila só os decoders)")
     p.add_argument("--cudnn-benchmark", action="store_true")
     p.add_argument("--channels-last", action="store_true", help="modelo em channels_last (convs 2D)")
     p.add_argument("--opt-impl", choices=("default", "foreach", "fused"), default="default", help="implementação do AdamW")
@@ -211,13 +228,19 @@ def broadcast_params(params: list[torch.nn.Parameter], world: int) -> None:
 # --- passo ----------------------------------------------------------------------------------------------------------
 
 
-def step_v5(model, istft, df_params, hp: StageFHParams, b: dict, a, amp: bool) -> dict:
+def step_v5(model, istft, df_params, hp: StageFHParams, b: dict, a, amp, mark=None) -> dict:
+    """`amp`: dtype do autocast (torch.bfloat16 / torch.float16) ou None/False; True = bf16 (compatibilidade).
+    `mark(nome)`: callback opcional após o forward do modelo (bench por fase)."""
+    if amp is True:
+        amp = torch.bfloat16
     spec, spec_clean, mask = b["spec"], b["spec_clean"], b["mask"]
     nb, T = spec.shape[0], spec.shape[2]
     profile = mask.reshape(nb) > 0
-    ctx = torch.autocast("cuda", dtype=torch.bfloat16) if amp else nullcontext()
+    ctx = torch.autocast("cuda", dtype=amp) if amp else nullcontext()
     with ctx:
         spec_e, m, lsnr, df_coefs = model(spec.clone(), b["feat_erb"], b["feat_spec"], b["embedding"], mask)
+    if mark is not None:
+        mark("fwd")
     spec_e, m, lsnr, df_coefs = spec_e.float(), m.float(), lsnr.float(), df_coefs.float()
     spec_m = model.base.mask(spec.clone(), m)
     if amp:  # a parte espectral (máscara ERB + filtro DF sobre o espectro) refeita em fp32 a partir de m e dos coefs
@@ -330,6 +353,50 @@ def fp32_spectral(model) -> None:
         mod.forward = fwd
 
 
+def fp32_grus(model) -> None:
+    """GRUs (nn.GRU ou LoRAGRU) fora do autocast, em fp32: troca o `forward` da instância."""
+    from cctrain.models.adapters import GRU_SITES, _get
+
+    for site in GRU_SITES:
+        mod = _get(model.base, site)
+        orig = mod.forward
+
+        def fwd(x, h=None, _orig=orig):
+            with torch.autocast("cuda", enabled=False):
+                return _orig(x.float(), None if h is None else h.float())
+        mod.forward = fwd
+
+
+def amp_dtype_of(a, device: str):
+    if not device.startswith("cuda") or a.amp == "none":
+        return None
+    return {"bf16": torch.bfloat16, "fp16": torch.float16}[a.amp]
+
+
+def setup_precision(model, a, amp_dtype) -> None:
+    if amp_dtype is not None:
+        fp32_spectral(model)
+        if a.gru_fp32:
+            fp32_grus(model)
+
+
+def setup_speed(model, a) -> None:
+    if a.lora_gru_fused:
+        from cctrain.models.adapters import set_lora_gru_fused
+
+        set_lora_gru_fused(model, True)
+
+
+def maybe_compile(model, a) -> None:
+    if not (a.compile or a.compile_mode):
+        return
+    kw = {"dynamic": False}
+    if a.compile_mode:
+        kw["mode"] = a.compile_mode
+    model.base.erb_dec = torch.compile(model.base.erb_dec, **kw)
+    model.base.df_dec = torch.compile(model.base.df_dec, **kw)
+
+
 def prepare(model, train_cond: bool) -> list:
     prepare_student(model)  # BN em eval/congelada, RNN em train (backward do cuDNN)
     return apply_trainable(model, train_cond=train_cond, train_adapters=True)
@@ -362,7 +429,7 @@ def main():
         device = f"cuda:{local}"
     else:
         device = "cpu"
-    amp = a.amp == "bf16" and device.startswith("cuda")
+    amp = amp_dtype_of(a, device)
     if a.global_batch % world:
         raise SystemExit(f"global-batch {a.global_batch} não divide por {world} ranks")
     bl = a.global_batch // world
@@ -398,11 +465,10 @@ def main():
     if is0:
         log(f"base {base_kind} ({init_desc}) | variante {a.variant} | adaptadores {acfg.to_dict()} | sítios {sites} | "
             f"parâmetros {json.dumps(counts)} | treináveis {n_tr} ({100 * n_tr / counts['total']:.2f}%)")
-    if amp:
-        fp32_spectral(model)
-    if a.compile:
-        model.base.erb_dec = torch.compile(model.base.erb_dec, dynamic=False)
-        model.base.df_dec = torch.compile(model.base.df_dec, dynamic=False)
+    setup_precision(model, a, amp)
+    setup_speed(model, a)
+    maybe_compile(model, a)
+    scaler = torch.amp.GradScaler("cuda", enabled=amp == torch.float16)
     istft = Istft(960, HOP, torch.as_tensor(_fft_window())).to(device)
     params = ModelParams()
     fast = a.sync_free or a.step_mode != "eager"
@@ -411,6 +477,8 @@ def main():
         torch.backends.cudnn.benchmark = True
     if a.channels_last:
         model.to(memory_format=torch.channels_last)
+    if fast and amp == torch.float16:
+        raise SystemExit("--sync-free/--step-mode não suportam --amp fp16 (GradScaler); use bf16")
     if defer and a.opt_impl != "fused":
         raise SystemExit("--log-every > 1 com --sync-free exige --opt-impl fused (pulo de passo não finito na GPU)")
     runner = None
@@ -418,22 +486,25 @@ def main():
         from cctrain.train.v5_fast import StepRunner
 
         runner = StepRunner(model, istft, params, hp, a, amp, trainable, mode=a.step_mode,
-                            compile_mode=a.compile_mode)
+                            compile_mode=a.step_compile_mode)
         if is0:
-            log(f"passo rápido: modo {a.step_mode}{' ' + a.compile_mode if a.step_mode == 'compile' else ''} | "
+            log(f"passo rápido: modo {a.step_mode}{' ' + a.step_compile_mode if a.step_mode == 'compile' else ''} | "
                 f"cudnn.benchmark {a.cudnn_benchmark} | channels_last {a.channels_last} | AdamW {a.opt_impl} | "
                 f"log a cada {a.log_every}")
 
     vp = V4Params(seed=a.seed, segment_s=a.segment_s, batch_size=a.global_batch, total_steps=total_steps,
                   phase1_frac=0.0, n_probs=_np(a.n_probs, 5, N_PROBS), pattern_probs=_np(a.pattern_probs, 4, PATTERN_PROBS),
                   p_interf_first=a.p_interf_first, p_turns=a.p_turns, turn_gap_max_s=a.turn_gap_max_s,
-                  p_rir_turns=a.p_rir_turns, p_target_absent=a.p_target_absent)
+                  p_rir_turns=a.p_rir_turns, p_target_absent=a.p_target_absent,
+                  **({} if a.p_drop is None else {"p_drop": a.p_drop}))
     hashed = {"v4": vp.hashable(), "lr": a.lr, "lr_scale": a.lr_scale, "wd": a.weight_decay, "warmup": warmup,
               "total_steps": total_steps, "gbatch": a.global_batch, "variant": a.variant, "base": base_kind,
               "adapter": acfg.to_dict(), "train_cond": train_cond,
               "lambdas": [a.lambda_leak, a.lambda_ovl, a.lambda_turn, a.lsnr_factor, a.lambda_n0g, a.n0g_hinge_db,
                           a.lambda_tail, a.tail_s, a.lambda_leak_absent],
               "turn": [a.turn_hinge_db, a.turn_boost, a.turn_decay_s], "fw": a.formant_weight, "v5": 1, "data": DATA_TAG}
+    if a.profile_drop_mode != "sample":  # padrão fora do hash: runs existentes mantêm o hash
+        hashed["drop_mode"] = a.profile_drop_mode  # o bloco = lote por rank (muda com o nº de GPUs, fora do hash)
     chash = config_hash(hashed)
     okw = {"fused": True} if a.opt_impl == "fused" else ({"foreach": True} if a.opt_impl == "foreach" else {})
     opt = torch.optim.AdamW(trainable, lr=lr, weight_decay=a.weight_decay, **okw)
@@ -459,12 +530,16 @@ def main():
     commit = git_commit()
 
     ds, pl = make_dataset(paths, vp)
+    if a.profile_drop_mode == "batch":
+        ds.drop_block = bl
     if is0:
         log(f"pools: {json.dumps(pl.stats)} | v4 {json.dumps(vp.hashable())}")
     sampler = [s * a.global_batch + rank * bl + k for s in range(step, total_steps) for k in range(bl)]
     mixer = None
     if a.gpu_mix:
         ds = StageV4RecipeDataset(ds.pools, ds.bank, ds.data_root, vp)
+        if a.profile_drop_mode == "batch":
+            ds.drop_block = bl
         mixer = GpuMixer.from_dataset(ds, device)
         if is0:
             log(f"--gpu-mix: receitas nos workers, mistura/rótulos/features em {device}")
@@ -473,6 +548,7 @@ def main():
                     pin_memory=device.startswith("cuda"), worker_init_fn=init_worker,
                     collate_fn=collate_recipes if mixer else None)
     n_refill = 0
+    n_skipped = 0
     data_tag = DATA_TAG + (f" + {GPU_MIX_TAG}" if mixer else "")
 
     t_start = time.monotonic()
@@ -620,12 +696,20 @@ def main():
                 last_ckpt = time.monotonic()
             continue
         opt.zero_grad(set_to_none=True)
-        if runner is not None:  # --sync-free com log a cada passo: mesmo laço, passo sem sync
-            parts = runner(b, on)
+        # --skip-off-batches: lote deste rank todo sem perfil -> nenhum treinável recebe gradiente (exatamente 0);
+        # pula forward/perdas, mas o passo do otimizador (grad 0) e as coletivas do DDP acontecem igual
+        skip = a.skip_off_batches and float(b["mask"].max()) <= 0
+        if skip:
+            parts, total = None, None
+            finite = torch.ones(1, device=device)
+            n_skipped += 1
         else:
-            parts = step_v5(model, istft, params, hp, b, a, amp)
-        total = parts["total"]
-        finite = torch.isfinite(total).float()
+            if runner is not None:  # --sync-free com log a cada passo: mesmo laço, passo sem sync (backward feito)
+                parts = runner(b, on)
+            else:
+                parts = step_v5(model, istft, params, hp, b, a, amp)
+            total = parts["total"]
+            finite = torch.isfinite(total).float()
         if world > 1:
             dist.all_reduce(finite, op=dist.ReduceOp.MIN)
         if finite.item() < 1:
@@ -639,11 +723,18 @@ def main():
                 break
             continue
         bad_run = 0
-        if runner is None:
-            total.backward()
-        allreduce_grads(trainable, world)
+        if runner is not None and total is not None:
+            pass  # o StepRunner já fez o backward
+        elif total is not None and total.requires_grad:
+            scaler.scale(total).backward()
+        else:  # lote todo sem perfil (--profile-drop-mode batch): nenhum treinável no grafo, gradiente exatamente 0
+            for p_ in trainable:
+                p_.grad = torch.zeros_like(p_)
+        allreduce_grads(trainable, world)  # antes do unscale_: todos os ranks veem o mesmo inf/NaN do fp16
+        scaler.unscale_(opt)
         gn = torch.nn.utils.clip_grad_norm_(trainable, clip)
-        opt.step()
+        scaler.step(opt)  # fp16: pula o passo se houver inf/NaN nos gradientes (e reduz a escala)
+        scaler.update()
         sched.step()
         step += 1
         if device.startswith("cuda"):
@@ -653,7 +744,7 @@ def main():
             stop_reason = "nan_params"
             log(f"parâmetro não finito no passo {step}")
             break
-        if is0:
+        if is0 and parts is not None:
             row = {k: float(v.detach()) for k, v in parts.items()}
             mr = max(row["mr"], 1e-9)
             for k in TERMS[1:]:
@@ -662,6 +753,7 @@ def main():
                 rel = {f"rel_{k}": float(np.median(v)) for k, v in rel_hist.items()}
                 lf.write(json.dumps({"step": step, "lr": float(sched.get_last_lr()[0]), **row, "grad_norm": float(gn),
                                      "dt": step_times[-1], "wait": waits[-1], **rel,
+                                     **({"scale": scaler.get_scale()} if scaler.is_enabled() else {}),
                                      "wall": time.strftime("%H:%M:%S")}) + "\n")
                 lf.flush()
             if step % 25 == 0 or step <= 3:
@@ -673,7 +765,8 @@ def main():
                     f"espera={wt:.3f} amostras/s={a.global_batch / max(sps + wt, 1e-9):.1f} lr={sched.get_last_lr()[0]:.2e} "
                     f"gTurn={row['g_turn_db']:+.1f} gTurn0.5={row['g_turn_early_db']:+.1f} gN0={row['g_n0_db']:+.1f} "
                     f"zeroOI={row['zero_frac_only_interf']:.2f} zeroT={row['zero_frac_target']:.3f} gn={float(gn):.2f} "
-                    f"vram={mem:.1f}GiB ETA={eta_h:.1f}h")
+                    f"vram={mem:.1f}GiB ETA={eta_h:.1f}h"
+                    + (f" escala={scaler.get_scale():.0f}" if scaler.is_enabled() else ""))
         flag = torch.tensor([1.0 if (stop["flag"] or (deadline and time.time() >= deadline)) else 0.0],
                             device=device)
         if world > 1:
@@ -693,7 +786,10 @@ def main():
         save("eval-snapshot-final", snap_dir, keep=10_000)
     if is0:
         summary = {"run_id": a.run_id, "step": step, "stop_reason": stop_reason, "elapsed_s": elapsed(),
-                   "world": world, "global_batch": a.global_batch, "amp": amp, "data": data_tag, "gpu_mix_cpu_refills": n_refill if mixer else None,
+                   "world": world, "global_batch": a.global_batch, "amp": a.amp if amp else "none", "gru_fp32": a.gru_fp32,
+                   "compile_mode": a.compile_mode,
+                   "grad_scale": scaler.get_scale() if scaler.is_enabled() else None,
+                   "drop_mode": a.profile_drop_mode, "lora_gru_fused": a.lora_gru_fused, "skipped_off_batches": n_skipped, "data": data_tag, "gpu_mix_cpu_refills": n_refill if mixer else None,
                    "s_per_step_median": statistics.median(step_times) if step_times else None,
                    "loader_wait_median": statistics.median(waits) if waits else None,
                    "samples_per_s": (a.global_batch / (statistics.median(step_times) + statistics.median(waits)))

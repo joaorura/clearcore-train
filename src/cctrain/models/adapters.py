@@ -131,7 +131,15 @@ class LoRAGRU(_Adapter):
 
     As amostras com perfil rodam a GRU com os pesos somados (W + g·s·BA) pelo mesmo kernel do `nn.GRU`
     (`torch._VF.gru`, cuDNN na GPU); as sem perfil rodam o módulo original. Os dois grupos são remontados na ordem.
+
+    `fused = True` (treino, gate binário g ∈ {0, 1}): em vez de duas chamadas do cuDNN (uma por grupo, cada uma com os
+    T passos sequenciais: o custo da GRU dobra num lote misto), UMA chamada com hidden 2H em que as duas GRUs (original
+    e com LoRA) correm lado a lado com pesos bloco-diagonais por porta (r, z, n); cada amostra fica com a metade do seu
+    grupo. Matematicamente idêntico (as portas da GRU são elemento a elemento); numericamente igual a ~1 ulp (outro
+    formato de GEMM), por isso só no treino: o padrão (False) mantém a saída bit-idêntica da base nas linhas sem perfil.
     """
+
+    fused: bool = False
 
     def __init__(self, gru: nn.GRU, rank: int, scale: float, gate: AdapterGate, film_emb_dim: int | None = None):
         super().__init__(gate)
@@ -177,6 +185,51 @@ class LoRAGRU(_Adapter):
             y = y * (1.0 + gv * gamma[:, None]) + gv * beta[:, None]
         return y, hn
 
+    def _fused_params(self) -> list[Tensor]:
+        """Pesos da GRU de hidden 2H = [original | com LoRA (g = 1)], bloco-diagonais por porta."""
+        g = self.orig
+        H = g.hidden_size
+        out = []
+        both = list(zip(self._params(0.0) if self.lora is None else self._params_raw(), self._params(1.0)))
+        for layer in range(g.num_layers):
+            (wi0, wi1), (wh0, wh1), (bi0, bi1), (bh0, bh1) = both[4 * layer: 4 * layer + 4]
+            if layer == 0:  # entrada compartilhada: só empilha as linhas por porta
+                w_ih = torch.cat([t for k in range(3) for t in (wi0[k * H:(k + 1) * H], wi1[k * H:(k + 1) * H])], 0)
+            else:
+                w_ih = _blockdiag_gates(wi0, wi1, H)
+            w_hh = _blockdiag_gates(wh0, wh1, H)
+            b_ih = torch.cat([t for k in range(3) for t in (bi0[k * H:(k + 1) * H], bi1[k * H:(k + 1) * H])], 0)
+            b_hh = torch.cat([t for k in range(3) for t in (bh0[k * H:(k + 1) * H], bh1[k * H:(k + 1) * H])], 0)
+            out += [w_ih, w_hh, b_ih, b_hh]
+        return out
+
+    def _params_raw(self) -> list[Tensor]:
+        g = self.orig
+        out = []
+        for layer in range(g.num_layers):
+            out += [getattr(g, f"weight_ih_l{layer}"), getattr(g, f"weight_hh_l{layer}"),
+                    getattr(g, f"bias_ih_l{layer}"), getattr(g, f"bias_hh_l{layer}")]
+        return out
+
+    def _forward_fused(self, x: Tensor, h: Tensor | None, g: Tensor, emb: Tensor | None) -> tuple[Tensor, Tensor]:
+        gr = self.orig
+        H = gr.hidden_size
+        if h is None:
+            h2 = torch.zeros(gr.num_layers, x.shape[0], 2 * H, dtype=x.dtype, device=x.device)
+        else:
+            h2 = torch.cat([h, h], dim=-1)
+        y2, hn2 = torch._VF.gru(x, h2, self._fused_params(), True, gr.num_layers, float(gr.dropout), gr.training,
+                                False, True)
+        on = g > 0
+        y1 = y2[..., H:]
+        if self.film is not None:
+            gamma, beta = self.film(emb).chunk(2, dim=-1)
+            gv = g.to(y1.dtype)[:, None, None]
+            y1 = y1 * (1.0 + gv * gamma[:, None]) + gv * beta[:, None]
+        y = torch.where(on[:, None, None], y1, y2[..., :H])
+        hn = torch.where(on[None, :, None], hn2[..., H:], hn2[..., :H])
+        return y, hn
+
     def forward(self, x: Tensor, h: Tensor | None = None) -> tuple[Tensor, Tensor]:
         g = self._on()
         if g is None:
@@ -184,6 +237,8 @@ class LoRAGRU(_Adapter):
         emb = self._gate.emb
         if self._gate.static:  # lote homogêneo com g ≡ 1: um só grupo, sem unique/nonzero (sem sync)
             return self._run_on(x, h, 1.0, emb)
+        if self.fused:
+            return self._forward_fused(x, h, g, emb)
         b = x.shape[0]
         groups = []  # (índices, valor de g)
         for gv in torch.unique(g[g > 0]).tolist():
@@ -202,6 +257,26 @@ class LoRAGRU(_Adapter):
         inv = torch.empty_like(order)
         inv[order] = torch.arange(b, device=order.device)
         return torch.cat(ys, 0)[inv], torch.cat(hs, 1)[:, inv]
+
+
+def _blockdiag_gates(w0: Tensor, w1: Tensor, H: int) -> Tensor:
+    """[3H, H] × 2 -> [6H, 2H]: por porta k, [[w0_k, 0], [0, w1_k]] (ordem das portas do cuDNN/torch: r, z, n)."""
+    z = w0.new_zeros(H, w1.shape[1])
+    rows = []
+    for k in range(3):
+        rows.append(torch.cat([w0[k * H:(k + 1) * H], z], 1))
+        rows.append(torch.cat([z, w1[k * H:(k + 1) * H]], 1))
+    return torch.cat(rows, 0)
+
+
+def set_lora_gru_fused(root: nn.Module, on: bool = True) -> int:
+    """Liga o caminho fundido (uma chamada do cuDNN com hidden 2H) em todas as LoRAGRU. Só para gate binário (treino)."""
+    n = 0
+    for m in root.modules():
+        if isinstance(m, LoRAGRU):
+            m.fused = on
+            n += 1
+    return n
 
 
 # --- montagem ------------------------------------------------------------------------------------------------------

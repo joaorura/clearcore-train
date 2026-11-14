@@ -183,3 +183,44 @@ def test_d_checkpoint_roundtrip(env, tmp_path):
         y = m2.base.enc.emb_gru(z)[0]
         y_ref = env[1].enc.emb_gru(z)[0]
     assert torch.equal(y, y_ref) and not torch.allclose(x, y)
+
+
+@pytest.mark.parametrize("film", [False, True])
+def test_e_fused_gru_matches_split(env, film):
+    """--lora-gru-fused (uma chamada com hidden 2H bloco-diagonal) = caminho com 2 chamadas, saída e gradientes."""
+    from cctrain.models.adapters import adapter_param_names, set_lora_gru_fused
+
+    m, _, _ = _p3(env, film)
+    _randomize(m)
+    names = set(adapter_param_names(m))
+    params = [p for n, p in m.named_parameters() if n in names]
+    for n, p in m.named_parameters():
+        p.requires_grad_(n in names)
+    m.train()
+    spec, ferb, fspec, emb = _inputs()
+    mask = torch.tensor([[0.0], [1.0], [1.0]])
+    res = []
+    for fused in (False, True):
+        set_lora_gru_fused(m, fused)
+        out = m(spec.clone(), ferb, fspec, emb, mask)
+        loss = sum(o.float().square().mean() for o in out)
+        res.append((out, torch.autograd.grad(loss, params)))
+    for a, b in zip(res[0][0], res[1][0]):
+        torch.testing.assert_close(b, a, rtol=1e-5, atol=1e-6)
+    for a, b in zip(res[0][1], res[1][1]):
+        torch.testing.assert_close(b, a, rtol=1e-4, atol=1e-5)  # fp32, outra ordem de soma
+
+
+def test_f_profile_drop_per_batch_homogeneous():
+    """--profile-drop-mode batch: mask0 igual dentro de cada bloco de `drop_block` índices, fração ~p_drop."""
+    from types import SimpleNamespace
+
+    from cctrain.data.mix_v4 import StageV4Dataset
+
+    ds = SimpleNamespace(p=SimpleNamespace(seed=20261114, p_drop=0.15), drop_block=0)
+    assert StageV4Dataset._mask0(ds, 5, True) is True  # padrão: o sorteio por amostra
+    ds.drop_block = 12
+    blocks = [[StageV4Dataset._mask0(ds, b * 12 + k, k % 2 == 0) for k in range(12)] for b in range(2000)]
+    assert all(len(set(b)) == 1 for b in blocks)
+    frac = sum(b[0] for b in blocks) / len(blocks)
+    assert 0.12 < frac < 0.18
