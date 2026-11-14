@@ -135,8 +135,9 @@ def main():
 
     def run_variant(name: str) -> dict:
         opts = set(name.split("+"))
-        base = next(iter(opts & {"ref", "ref-nolog", "fl", "fl-nolog", "sf", "graph", "c-default", "c-ro", "c-mat"}),
-                    "sf")
+        # ordem fixa: o modo do StepRunner tem precedência sobre "fl" (que também é a opção +fl)
+        base = next((x for x in ("sf", "graph", "c-default", "c-ro", "c-mat", "ref", "ref-nolog", "fl-nolog", "fl")
+                     if x in opts), "sf")
         import cctrain.losses.fast_v5 as fv5
 
         fv5.set_compile("lc" in opts)
