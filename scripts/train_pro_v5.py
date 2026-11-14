@@ -105,6 +105,9 @@ def parse_args(argv=None):
     p.add_argument("--variant", choices=sorted(VARIANTS), default="P3")
     p.add_argument("--base", choices=("dfn3", "v31"), default=None, help="sobrepõe a base da variante")
     p.add_argument("--v31-ckpt", default=None, help="checkpoint do v3.1 (só --base v31)")
+    p.add_argument("--init-from", default=None,
+                   help="checkpoint (ckpt-*.pt) de onde inicializar SÓ os pesos do modelo (strict); optimizer/scheduler/RNG "
+                        "novos, passo 0 (não é retomada; entra no hash da config)")
     p.add_argument("--gru-rank", type=int, default=None)
     p.add_argument("--enc-rank", type=int, default=None)
     p.add_argument("--alpha-over-rank", type=float, default=1.0, help="escala s = alpha/rank do LoRA")
@@ -508,6 +511,10 @@ def build_v5(a, device: str, hp: StageFHParams, paths: Paths):
         from cctrain.models.pdfnet3_pro import attach_lsnr_correction
 
         attach_lsnr_correction(model, a.lsnr_corr)
+    if getattr(a, "init_from", None):  # fine-tune: só o state_dict do modelo; mesma arquitetura (strict)
+        ck = Path(a.init_from)
+        model.load_state_dict(load_checkpoint(ck).model, strict=True)
+        init_desc = f"init-from {ck}"
     model.to(device)
     return model, cfg, sites, base, train_cond, init_desc
 
@@ -687,6 +694,8 @@ def main():
     if a.lsnr_corr > 0 or keep_on(a):  # pro-v5-keep (fora do hash quando desligado: runs existentes mantêm o hash)
         hashed["keep"] = [a.lsnr_corr, a.gate_st_tau, a.zero_tau, a.lambda_zero_tgt, a.zero_tgt_hinge_db, a.lambda_p10,
                           a.p10_q, a.p10_hinge_db, a.p10_min_frames]
+    if a.init_from:  # fine-tune (fora do hash quando ausente: runs existentes mantêm o hash)
+        hashed["init_from"] = str(Path(a.init_from).resolve())
     if a.profile_drop_mode != "sample":  # padrão fora do hash: runs existentes mantêm o hash
         hashed["drop_mode"] = a.profile_drop_mode  # o bloco = lote por rank (muda com o nº de GPUs, fora do hash)
     chash = config_hash(hashed)
