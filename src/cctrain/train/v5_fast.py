@@ -80,10 +80,11 @@ def mr_and_os(est: Tensor, tgt: Tensor, max_freq: Tensor, os_weight: Tensor, *, 
         y_abs, s_abs = y.abs().clamp_min(_EPS).pow(gamma), s.abs().clamp_min(_EPS).pow(gamma)
         w = _bin_w(max_freq, n_fft)
         mr = mr + _per_sample((y_abs - s_abs) ** 2, w).mean() * factor
-        if factor_complex:
-            yc = y_abs * torch.exp(1j * angle.apply(y))
-            sc = s_abs * torch.exp(1j * angle.apply(s))
-            mr = mr + _per_sample((torch.view_as_real(yc) - torch.view_as_real(sc)) ** 2, w).mean() * factor_complex
+        if factor_complex:  # view_as_real(|·|^γ · e^{jφ}) em reais (o inductor não lida com o escalar complexo 1j)
+            ay, as_ = angle.apply(y), angle.apply(s)
+            yc = torch.stack([y_abs * torch.cos(ay), y_abs * torch.sin(ay)], -1)
+            sc = torch.stack([s_abs * torch.cos(as_), s_abs * torch.sin(as_)], -1)
+            mr = mr + _per_sample((yc - sc) ** 2, w).mean() * factor_complex
         fw, fm = _formant_w(n_fft, est.device, formant_weight)
         err = F.relu(s_abs - y_abs) ** 2
         if extra_formant_penalty > 0.0:
