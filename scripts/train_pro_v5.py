@@ -76,7 +76,8 @@ from cctrain.train.stage_c import _lsnr_target, _to_device  # noqa: E402
 from cctrain.train.stage_f import HOP, StageFHParams, prepare_student  # noqa: E402
 from cctrain.data.mix_v4 import N_PROBS, PATTERN_PROBS, V4Params  # noqa: E402
 from cctrain.data.workers import init_worker  # noqa: E402
-from cctrain.data.gpu.mixer import GpuMixer  # noqa: E402
+from cctrain.data.gpu.mixer import GpuMixer, PoolMixer  # noqa: E402
+from cctrain.data.gpu.pool import GpuClipPool, StageV4PoolRecipeDataset  # noqa: E402
 from cctrain.data.gpu.prefetch import MixPrefetcher  # noqa: E402
 from cctrain.data.gpu.recipe import StageV4RecipeDataset, collate_recipes  # noqa: E402
 
@@ -161,6 +162,16 @@ def parse_args(argv=None):
                         "roda (cctrain.data.gpu.prefetch); lotes idênticos, só esconde a latência")
     p.add_argument("--gpu-mix-wire", choices=("dense", "sparse"), default="dense",
                    help="--gpu-mix: trilhas secas no H2D; sparse manda só os quadros ligados (exato, ~25%% menos bytes)")
+    p.add_argument("--gpu-pool-gb", type=float, default=0.0,
+                   help="--gpu-mix: pool residente de clipes de origem (48 kHz, int16 quando sem perda) com N GB por GPU; "
+                        "a receita referencia o pool e o lote não leva áudio pelo PCIe (cctrain.data.gpu.pool). 0 desliga")
+    p.add_argument("--gpu-pool-refresh-pct-per-min", type=float, default=0.0,
+                   help="--gpu-pool-gb: %% das posições do pool trocadas por minuto em segundo plano (0 = pool fixo)")
+    p.add_argument("--gpu-pool-codec", choices=("exact", "int16"), default="exact",
+                   help="--gpu-pool-gb: exact = int16 só quando sem perda, senão f32 (bit a bit); int16 = tudo int16 com "
+                        "escala por clipe (≈2× mais horas, erro ≤ meio passo nos clipes MP3/reamostrados)")
+    p.add_argument("--gpu-pool-delay", type=int, default=0,
+                   help="--gpu-pool-gb: lotes de quarentena de um slot trocado (0 = 2·workers·prefetch + 16)")
     return p.parse_args(argv)
 
 
@@ -437,10 +448,19 @@ def main():
     if is0:
         log(f"pools: {json.dumps(pl.stats)} | v4 {json.dumps(vp.hashable())}")
     sampler = [s * a.global_batch + rank * bl + k for s in range(step, total_steps) for k in range(bl)]
-    mixer = None
+    mixer = pool = None
     if a.gpu_mix:
         ds = StageV4RecipeDataset(ds.pools, ds.bank, ds.data_root, vp)
-        mixer = GpuMixer.from_dataset(ds, device, dtype=torch.float32 if a.gpu_mix_dtype == "f32" else torch.float64)
+        mdt = torch.float32 if a.gpu_mix_dtype == "f32" else torch.float64
+        if a.gpu_pool_gb > 0:
+            pool = GpuClipPool(ds, device, a.gpu_pool_gb, codec=a.gpu_pool_codec,
+                               refresh_pct_per_min=a.gpu_pool_refresh_pct_per_min,
+                               delay_batches=a.gpu_pool_delay or 2 * max(workers, 1) * a.prefetch + 16,
+                               seed=a.seed * 1000 + rank, threads=max(workers, 2), log=log if is0 else (lambda *_: None))
+            ds = StageV4PoolRecipeDataset(ds, pool.index)
+            mixer = PoolMixer.from_dataset(ds, device, pool=pool, dtype=mdt)
+        else:
+            mixer = GpuMixer.from_dataset(ds, device, dtype=mdt)
         if is0:
             log(f"--gpu-mix: receitas nos workers, mistura/rótulos/features em {device}")
     dl = DataLoader(ds, batch_size=bl, sampler=sampler, num_workers=workers,
@@ -448,7 +468,8 @@ def main():
                     pin_memory=device.startswith("cuda"), worker_init_fn=init_worker,
                     collate_fn=functools.partial(collate_recipes, sparse=a.gpu_mix_wire == "sparse") if mixer else None)
     n_refill = 0
-    data_tag = DATA_TAG + (f" + {GPU_MIX_TAG}" if mixer else "")
+    data_tag = DATA_TAG + (f" + {GPU_MIX_TAG}" if mixer else "") + \
+        (f" + gpu-pool {a.gpu_pool_codec} {a.gpu_pool_gb:g}GB r{a.gpu_pool_refresh_pct_per_min:g}" if pool else "")
 
     t_start = time.monotonic()
     last_ckpt = t_start
@@ -480,6 +501,8 @@ def main():
     lf = open(log_path, "a") if is0 else None
     overlap = mixer is not None and a.gpu_mix_overlap and device.startswith("cuda")
     it = MixPrefetcher(iter(dl), mixer, ds, device) if overlap else iter(dl)
+    if pool is not None:
+        pool.start()  # depois do fork dos workers (iter(dl)): a thread de renovação só existe no processo principal
     while step < end_step:
         tw = time.perf_counter()
         try:
@@ -569,6 +592,7 @@ def main():
                    "world": world, "global_batch": a.global_batch, "amp": amp, "data": data_tag, "gpu_mix_cpu_refills": n_refill if mixer else None,
                    "gpu_mix_dtype": a.gpu_mix_dtype if mixer else None, "gpu_mix_overlap": overlap,
                    "gpu_mix_wire": a.gpu_mix_wire if mixer else None,
+                   "gpu_pool": pool.summary() if pool is not None else None,
                    "s_per_step_median": statistics.median(step_times) if step_times else None,
                    "loader_wait_median": statistics.median(waits) if waits else None,
                    "samples_per_s": (a.global_batch / (statistics.median(step_times) + statistics.median(waits)))
@@ -581,6 +605,8 @@ def main():
         lf.close()
     if overlap:
         it.close()
+    if pool is not None:
+        pool.close()
     if world > 1:
         dist.barrier()
         dist.destroy_process_group()

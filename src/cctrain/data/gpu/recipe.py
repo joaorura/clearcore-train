@@ -51,7 +51,11 @@ class StageV4RecipeDataset(StageV4Dataset):
     """`i -> receita` (dict de numpy), mesma semântica de índice/retomada do `StageV4Dataset`."""
 
     def __getitem__(self, i: int) -> dict:
-        for attempt in range(MAX_REDRAWS):
+        return self.recipe_from(i, 0)
+
+    def recipe_from(self, i: int, first_attempt: int) -> dict:
+        """Receita da amostra `i` a partir da tentativa `first_attempt` (refação de `valid=False` = tentativa seguinte)."""
+        for attempt in range(int(first_attempt), MAX_REDRAWS):
             rng = np.random.default_rng([int(self.p.seed), int(i), int(attempt)])
             try:
                 r = self._recipe(int(i), rng)
@@ -60,6 +64,25 @@ class StageV4RecipeDataset(StageV4Dataset):
             except (EmbeddingBankError, ValueError):
                 continue
         raise RuntimeError(f"amostra {i}: {MAX_REDRAWS} sorteios falharam")
+
+    # ganchos do áudio: aqui o áudio cru (numpy); `pool.StageV4PoolRecipeDataset` troca por referências ao pool na GPU
+    def _tilt(self, x):
+        return whisper_tilt(x)
+
+    def _is_dead(self, x, on: np.ndarray, frames: int) -> bool:
+        return _dead(x, on, frames)
+
+    def _noise_draw(self, rng: np.random.Generator, n: int):
+        nrec = self.pools.noise[int(rng.integers(len(self.pools.noise)))]
+        return loop_to_length(self._load48(nrec[0]), n, rng)
+
+    def _floor_draw(self, rng: np.random.Generator, n: int):
+        return rng.standard_normal(n).astype(np.float32)  # pink_noise() sorteia o mesmo branco
+
+    def _audio_fields(self, tracks: list, noise, floor_white) -> dict:
+        return {"dry": np.stack([np.asarray(x, np.float32) for x in tracks]),
+                "noise": np.zeros(0, np.float32) if noise is None else noise,
+                "floor_white": np.zeros(0, np.float32) if floor_white is None else floor_white}
 
     def cpu_sample(self, i: int) -> dict:
         """A amostra pelo caminho CPU de referência (fallback de `valid=False` e testes)."""
@@ -81,7 +104,7 @@ class StageV4RecipeDataset(StageV4Dataset):
         tdry, trec = self._speech(rng, tkey, n, tier)
         lvl_db, low = _level(rng)
         if target_present and low and rng.random() < 0.5:
-            tdry = whisper_tilt(tdry)
+            tdry = self._tilt(tdry)
         taken = {tkey}
         idry, irecs = [], []
         for _ in range(n_int):
@@ -98,10 +121,10 @@ class StageV4RecipeDataset(StageV4Dataset):
             for k in range(1 + n_int):
                 rir_idx[k] = int(rng.integers(len(self.pools.rirs)))
         # exceções dependentes do áudio (ver docstring do módulo): todas as trilhas presentes precisam de fala
-        if target_present and _dead(tdry, on[0], frames):
+        if target_present and self._is_dead(tdry, on[0], frames):
             raise ValueError("alvo sem fala ativa")
         for k, x in enumerate(idry):
-            if _dead(x, on[k + 1], frames):
+            if self._is_dead(x, on[k + 1], frames):
                 raise ValueError("interferente sem fala ativa")
         sirs = np.full(MAX_TRACKS - 1, np.nan)
         rels = np.full(MAX_TRACKS - 1, np.nan)
@@ -114,18 +137,17 @@ class StageV4RecipeDataset(StageV4Dataset):
         mode, val = _noise_mode(rng, phase)
         band = trec[2] if target_present else irecs[0][2]
         src_sr = trec[1] if target_present else irecs[0][1]
-        noise = np.zeros(0, np.float32)
+        noise = None
         lp_cut = NYQUIST_HZ  # sem passa-baixa
         if mode == "snr":
-            nrec = self.pools.noise[int(rng.integers(len(self.pools.noise)))]
-            noise = loop_to_length(self._load48(nrec[0]), n, rng)
+            noise = self._noise_draw(rng, n)
             if src_sr < 2 * NYQUIST_HZ:
                 lp_cut = src_sr / 2.0 * 0.98
-        floor_white = np.zeros(0, np.float32)
+        floor_white = None
         pink = False
         if mode != "snr":
             pink = bool(rng.random() < 0.5)
-            floor_white = rng.standard_normal(n).astype(np.float32)  # pink_noise() sorteia o mesmo branco
+            floor_white = self._floor_draw(rng, n)
         mask0 = bool(rng.random() < p.p_drop)
         exclude = (trec[0],) + self.pools.heldout_enroll
         if self.provenance:
@@ -133,16 +155,17 @@ class StageV4RecipeDataset(StageV4Dataset):
                                               p_denoised=p.p_enroll_denoise), np.float32)
         else:
             emb = np.asarray(self.bank.sample(tkey, rng), np.float32)
-        tracks = ([np.asarray(tdry, np.float32)] if target_present else []) + [np.asarray(x, np.float32) for x in idry]
+        tracks = ([tdry] if target_present else []) + list(idry)
         track_k = ([0] if target_present else []) + list(range(1, n_int + 1))
         on_full = np.zeros((MAX_TRACKS, frames), bool)
         on_full[: 1 + n_int] = on
         return {
-            "index": np.int64(i), "dry": np.stack(tracks), "track_k": np.asarray(track_k, np.int64),
+            "index": np.int64(i), **self._audio_fields(tracks, noise, floor_white),
+            "track_k": np.asarray(track_k, np.int64),
             "on": on_full, "rir_idx": rir_idx, "reverb": np.bool_(reverb), "sirs": sirs, "rels": rels,
             "n_interf": np.int64(n_int), "has_target": np.bool_(target_present), "level_db": np.float64(lvl_db),
-            "noise_silent": np.bool_(mode == "silent"), "noise_val": np.float64(val), "noise": noise,
-            "lp_cut": np.float64(lp_cut), "floor_white": floor_white, "floor_pink": np.bool_(pink),
+            "noise_silent": np.bool_(mode == "silent"), "noise_val": np.float64(val),
+            "lp_cut": np.float64(lp_cut), "floor_pink": np.bool_(pink),
             "mask0": np.bool_(mask0), "embedding": emb, "max_freq": np.float32(min(band, NYQUIST_HZ)),
             "pattern": PATTERNS.index(pat), "phase": np.int64(phase), "target_key": tkey, "target_path": trec[0],
         }
@@ -176,20 +199,33 @@ def _pack_dry(items: list[dict], dry: np.ndarray) -> dict:
 def collate_recipes(items: list[dict], sparse: bool = False) -> dict:
     """`sparse=True` manda só os quadros ligados das trilhas secas (`_pack_dry`; exato, a rig tem PCIe x1) e o
     `GpuMixer` os reexpande na GPU. Lote compacto: só as trilhas presentes (`dry[M, n]` + `track_b`/`track_k`), ruído só das amostras com SNR e
-    branco do piso só das silenciosas (≈3,5 MB/amostra em 6 s, contra 8 MB com tudo preenchido)."""
+    branco do piso só das silenciosas (≈3,5 MB/amostra em 6 s, contra 8 MB com tudo preenchido).
+
+    Receitas do pool (`dry_ref` em vez de `dry`): nenhum áudio, só referências `dry_ref[M, 6]`, `noise_ref[Bn, 5]` e
+    `floor_seed[Bf, 1]` (ver `cctrain.data.gpu.pool`)."""
     out: dict = {k: torch.from_numpy(np.stack([np.asarray(it[k]) for it in items])) for k in _STACK}
-    dry = np.concatenate([it["dry"] for it in items])
-    if sparse and dry.shape[1] % HOP == 0:
-        out.update(_pack_dry(items, dry))
+    pooled = "dry_ref" in items[0]
+    if pooled:
+        out["dry_ref"] = torch.from_numpy(np.concatenate([it["dry_ref"] for it in items]))
+        out["n_samples"] = torch.tensor(int(items[0]["n_samples"]))
     else:
-        out["dry"] = torch.from_numpy(dry)
+        dry = np.concatenate([it["dry"] for it in items])
+        if sparse and dry.shape[1] % HOP == 0:
+            out.update(_pack_dry(items, dry))
+        else:
+            out["dry"] = torch.from_numpy(dry)
     out["track_b"] = torch.cat([torch.full((len(it["track_k"]),), b, dtype=torch.long) for b, it in enumerate(items)])
     out["track_k"] = torch.from_numpy(np.concatenate([it["track_k"] for it in items]))
-    for key, flag in (("noise", lambda it: len(it["noise"]) > 0), ("floor_white", lambda it: len(it["floor_white"]) > 0)):
-        sel = [b for b, it in enumerate(items) if flag(it)]
-        n = items[0]["dry"].shape[1]
-        out[key] = torch.from_numpy(np.stack([items[b][key] for b in sel])) if sel else torch.zeros(0, n)
-        out[key + "_b"] = torch.as_tensor(sel, dtype=torch.long)
+    keys = (("noise_ref", "noise"), ("floor_seed", "floor_white")) if pooled else (("noise", "noise"), ("floor_white", "floor_white"))
+    for key, name in keys:
+        sel = [b for b, it in enumerate(items) if len(it[key]) > 0]
+        if sel:
+            out[key] = torch.from_numpy(np.stack([np.asarray(items[b][key]) for b in sel]))
+        elif pooled:
+            out[key] = torch.zeros((0, 5) if key == "noise_ref" else (0, 1), dtype=torch.long)
+        else:
+            out[key] = torch.zeros(0, items[0]["dry"].shape[1])
+        out[name + "_b"] = torch.as_tensor(sel, dtype=torch.long)
     out["target_key"] = [it["target_key"] for it in items]
     out["target_path"] = [it["target_path"] for it in items]
     return out

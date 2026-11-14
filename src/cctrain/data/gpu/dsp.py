@@ -174,3 +174,15 @@ def lowpass48(x: torch.Tensor, cutoff_hz: torch.Tensor, dtype: torch.dtype = tor
     y = _fir_filter(y.flip(1), h).flip(1)
     out[idx] = y[:, _PADLEN : _PADLEN + n].to(x.dtype)
     return out
+
+
+def whisper_tilt(x: torch.Tensor) -> torch.Tensor:
+    """`mix_v4.whisper_tilt` em lote (polo único em 1 kHz + mesma RMS), float64 `[M, n]`. O IIR vira FIR pela resposta
+    ao impulso (1−a)·aᵏ truncada em 400 amostras (a⁴⁰⁰ ≈ 3e−23, abaixo do arredondamento f64), convolução por FFT."""
+    a = math.exp(-2 * math.pi * 1000.0 / 48000)
+    m, n = x.shape
+    k = torch.arange(400, dtype=torch.float64, device=x.device)
+    h = (1 - a) * torch.pow(torch.tensor(a, dtype=torch.float64, device=x.device), k)
+    L = n + h.numel() - 1
+    y = torch.fft.irfft(torch.fft.rfft(x, L, dim=1) * torch.fft.rfft(h, L)[None], L, dim=1)[:, :n]
+    return y * (torch.sqrt(torch.mean(x**2, dim=1, keepdim=True)) / (torch.sqrt(torch.mean(y**2, dim=1, keepdim=True)) + 1e-20))

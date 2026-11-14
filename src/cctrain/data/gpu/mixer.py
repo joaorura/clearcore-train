@@ -56,17 +56,28 @@ class GpuMixer:
         hs = [cache[rel][0] for rel in ds.pools.rirs]
         return cls(hs, [len(cache[rel][1]) for rel in ds.pools.rirs], device, **kw)
 
+    # entradas de áudio do lote (f32 na GPU); `PoolMixer` as monta a partir do pool residente
+    def _dry(self, rb: dict) -> Tensor:
+        dev = self.device
+        if "dry_packed" in rb:  # collate_recipes(sparse=True): reexpande os quadros enviados, o resto é zero
+            M_, n_ = (int(v) for v in rb["dry_shape"])
+            dry = torch.zeros(M_, n_ // HOP, HOP, dtype=torch.float32, device=dev)
+            dry[rb["dry_m"].to(dev, non_blocking=True), rb["dry_f"].to(dev, non_blocking=True)] = \
+                rb["dry_packed"].to(dev, non_blocking=True)
+            return dry.reshape(M_, n_)
+        return rb["dry"].to(dev, non_blocking=True)
+
+    def _noise(self, rb: dict, n: int) -> Tensor:
+        return rb["noise"].to(self.device, non_blocking=True).float()
+
+    def _floor_white(self, rb: dict, n: int) -> Tensor:
+        return rb["floor_white"].to(self.device, non_blocking=True)
+
     @torch.no_grad()
     def __call__(self, rb: dict, debug: bool = False) -> dict:
         dev, dt, ldt = self.device, self.dtype, self.label_dtype
         g_ = lambda k: rb[k].to(dev, non_blocking=True)  # noqa: E731
-        if "dry_packed" in rb:  # collate_recipes(sparse=True): reexpande os quadros enviados, o resto é zero
-            M_, n_ = (int(v) for v in rb["dry_shape"])
-            dry = torch.zeros(M_, n_ // HOP, HOP, dtype=torch.float32, device=dev)
-            dry[g_("dry_m"), g_("dry_f")] = g_("dry_packed")
-            dry = dry.reshape(M_, n_)
-        else:
-            dry = g_("dry")
+        dry = self._dry(rb)
         M, n = dry.shape
         F = n // HOP
         B = rb["index"].shape[0]
@@ -115,7 +126,7 @@ class GpuMixer:
         noise = torch.zeros(B, n, dtype=dt, device=dev)
         nb = g_("noise_b")
         if nb.numel():
-            nz = dsp.lowpass48(g_("noise").float(), g_("lp_cut")[nb], dtype=self.lp_dtype).to(dt)
+            nz = dsp.lowpass48(self._noise(rb, n), g_("lp_cut")[nb], dtype=self.lp_dtype).to(dt)
             nz_db = _db(torch.mean(nz.double() ** 2, dim=1)) if dt != torch.float64 else _db(torch.mean(nz**2, dim=1))
             noise[nb] = nz * torch.pow(10.0, (ref_db[nb] - val[nb] - nz_db) / 20.0)[:, None].to(dt)
         g = torch.pow(10.0, (g_("level_db") - ref_db) / 20.0)
@@ -124,7 +135,7 @@ class GpuMixer:
         floor = torch.zeros(B, n, dtype=dt, device=dev) if debug else None
         fb = g_("floor_white_b")
         if fb.numel():
-            w = g_("floor_white").to(dt)
+            w = self._floor_white(rb, n).to(dt)
             pk_ = g_("floor_pink")[fb]
             if bool(pk_.any()):
                 w[pk_] = dsp.pink_from_white(w[pk_])
@@ -186,4 +197,68 @@ class GpuMixer:
                 elif k in out:
                     out[k][b] = torch.as_tensor(np.asarray(v)).to(out[k].device, out[k].dtype)
             out["valid"][b] = True
+        return len(bad)
+
+
+class PoolMixer(GpuMixer):
+    """`GpuMixer` alimentado pelo pool residente (`cctrain.data.gpu.pool`): o lote traz só referências; a GPU recorta,
+    converte (int16 -> f32) e aplica o sussurro; o resto da mistura é o mesmo código."""
+
+    def __init__(self, *a, pool, **kw):
+        super().__init__(*a, **kw)
+        self.pool = pool
+
+    @classmethod
+    def from_dataset(cls, ds, device="cuda", pool=None, **kw) -> PoolMixer:
+        cache = ds._rirs()
+        hs = [cache[rel][0] for rel in ds.pools.rirs]
+        return cls(hs, [len(cache[rel][1]) for rel in ds.pools.rirs], device, pool=pool, **kw)
+
+    def _dry(self, rb: dict) -> Tensor:
+        ref = rb["dry_ref"]
+        dry = self.pool.gather(ref, int(rb["n_samples"]), wrap=False, gid_col=5)
+        tilt = (ref[:, 4] == 1).nonzero().squeeze(1)
+        if tilt.numel():
+            td = tilt.to(self.device)
+            dry[td] = dsp.whisper_tilt(dry[td].double()).float()
+        return dry
+
+    def _noise(self, rb: dict, n: int) -> Tensor:
+        return self.pool.gather(rb["noise_ref"], n, wrap=True, gid_col=4)
+
+    def _floor_white(self, rb: dict, n: int) -> Tensor:
+        return self.pool.floor_white(rb["floor_seed"], n)
+
+    @torch.no_grad()
+    def __call__(self, rb: dict, debug: bool = False, count: bool = True) -> dict:
+        out = super().__call__(rb, debug)
+        out["attempt"] = rb["attempt"]
+        if count:
+            self.pool.note_batch()
+        return out
+
+    def fill_invalid(self, out: dict, ds) -> int:
+        """`valid=False`: refaz a receita com a tentativa seguinte (como o `_build`), ainda do pool, e mistura na GPU."""
+        from cctrain.data.gpu.recipe import collate_recipes
+
+        bad = (~out["valid"]).nonzero().squeeze(1).tolist()
+        B = len(out["valid"])
+        todo = [(b, int(out["index"][b]), int(out["attempt"][b]) + 1) for b in bad]
+        while todo:  # todas as refações do lote numa mistura só (por rodada)
+            sub = self(collate_recipes([ds.recipe_from(i, att) for _, i, att in todo]), count=False)
+            nxt = []
+            for j, (b, i, _) in enumerate(todo):
+                if not bool(sub["valid"][j]):
+                    nxt.append((b, i, int(sub["attempt"][j]) + 1))
+                    continue
+                for k, v in sub.items():
+                    if k in ("debug", "valid", "attempt"):
+                        continue
+                    if isinstance(v, list):
+                        out[k][b] = v[j]
+                    elif torch.is_tensor(v) and v.dim() and out[k].shape[0] == B:
+                        out[k][b] = v[j].to(out[k].device, out[k].dtype)
+                out["valid"][b] = True
+            todo = nxt
+        out.pop("attempt", None)
         return len(bad)
