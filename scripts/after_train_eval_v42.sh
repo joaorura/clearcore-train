@@ -23,6 +23,8 @@ run() { local what="$1"; shift; log "CMD ($what): $*"; ( cd "$WT" && source scri
 log "disparador (pid $$): aguardando treino $TRAIN_PID e avaliador ${WATCH_PID:--}"
 while kill -0 "$TRAIN_PID" 2>/dev/null; do sleep 60; done
 log "treino encerrado"
+# o avaliador pode ter sido trocado durante o treino (pro-v5): vale o pid atual de watch.pid
+[ -s "$RUN_DIR/watch.pid" ] && WATCH_PID="$(cat "$RUN_DIR/watch.pid")"
 if [ -n "$WATCH_PID" ]; then
   n=0; while kill -0 "$WATCH_PID" 2>/dev/null && [ $n -lt 120 ]; do sleep 30; n=$((n+1)); done
   kill "$WATCH_PID" 2>/dev/null

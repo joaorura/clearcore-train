@@ -202,6 +202,25 @@ def better(a: dict, b: dict | None, tiebreak: str = "c8,c6,c1") -> bool:
     return ka > kb
 
 
+def pick_c8gate(rows: list[dict], c8_min: float, c1_floor: float, tiebreak: str = "c6,c1") -> dict | None:
+    """pro-v5: candidato = C8 ≥ c8_min (isolamento real); entre candidatos, mais PASS, desempate `tiebreak`. Sem
+    candidato: o de maior C8 entre os com C1 ≥ c1_floor (desempate pelo mesmo critério)."""
+    def f(r, k):
+        return float(np.nan_to_num(r.get(k, float("nan")), nan=-99))
+    cand = [r for r in rows if f(r, "c8_pct") >= c8_min]
+    if cand:
+        best = None
+        for r in cand:
+            if better(r, best, tiebreak):
+                best = r
+        return best
+    ok = [r for r in rows if f(r, "c1_db") >= c1_floor]
+    if not ok:
+        return None
+    order = [TIEBREAK_KEYS[k.strip()] for k in tiebreak.split(",") if k.strip()]
+    return max(ok, key=lambda r: (f(r, "c8_pct"), r["pass"], *(f(r, k) for k in order)))
+
+
 def line(r: dict) -> str:
     c = r["crit"]
     return (f"passo {r['step']}: {r['pass']}/{r['n_crit']} PASS | C6 {r['c6_db']:+.1f} dB | C1 {r['c1_db']:+.2f}±{1.96 * r.get('c1_se', float('nan')):.2f} dB (IC95) | "
@@ -243,13 +262,26 @@ def cmd_watch(a) -> None:
             fh.write(json.dumps(r) + "\n")
         done_steps.add(step)
         print(line(r), flush=True)
-        if better(r, best, a.tiebreak):
+        if a.select == "c8gate":  # recalcula sobre todas as linhas cujo snapshot ainda existe (ou é o best atual)
+            rows = [json.loads(x) for x in jl.read_text().splitlines() if x.strip()]
+            avail = [x for x in rows if (snap / f"ckpt-{x['step']:08d}.pt").exists()
+                     or (best is not None and x["step"] == best.get("step"))]
+            nb = pick_c8gate(avail, a.c8_min, a.c1_floor, a.tiebreak)
+            if nb is not None and (best is None or nb["step"] != best.get("step")):
+                src = snap / f"ckpt-{nb['step']:08d}.pt"
+                if src.exists():
+                    shutil.copy2(src, best_dir / "best.pt")
+                    best = dict(nb, best_ckpt=str(best_dir / "best.pt"), rule=f"c8>={a.c8_min} | c1>={a.c1_floor}")
+                    bestp.write_text(json.dumps(best, indent=1))
+                    print(f"  -> novo melhor (passo {nb['step']}, regra c8gate)", flush=True)
+        elif better(r, best, a.tiebreak):
             shutil.copy2(p, best_dir / "best.pt")
             r2 = dict(r, best_ckpt=str(best_dir / "best.pt"))
             bestp.write_text(json.dumps(r2, indent=1))
             best = r2
             print(f"  -> novo melhor (passo {step})", flush=True)
-        p.unlink(missing_ok=True)
+        if not a.keep_all:
+            p.unlink(missing_ok=True)
 
 
 def main() -> None:
@@ -268,6 +300,11 @@ def main() -> None:
     p.add_argument("--best-dir", required=True)
     p.add_argument("--done-file", default=None)
     p.add_argument("--tiebreak", default="c8,c6,c1", help="desempate depois do nº de PASS (pro-v5: c6,c1)")
+    p.add_argument("--select", choices=("default", "c8gate"), default="default",
+                   help="c8gate (pro-v5): só C8 ≥ --c8-min é candidato; sem candidato, maior C8 com C1 ≥ --c1-floor")
+    p.add_argument("--c8-min", type=float, default=85.0)
+    p.add_argument("--c1-floor", type=float, default=-3.0)
+    p.add_argument("--keep-all", action="store_true", help="não apaga snapshots avaliados")
     p.add_argument("--threads", type=int, default=2)
     a = ap.parse_args()
     init_env(a.threads)

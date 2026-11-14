@@ -53,7 +53,7 @@ CMD=("$PY" -m torch.distributed.run --standalone --nproc_per_node "$NG" scripts/
 
 WP=""
 if [ "$QUICK_EVAL" = 1 ]; then
-  "$PY" scripts/eval_quick.py watch --snap-dir "$RUN_DIR/snapshots" --cache "$CACHE" --tiebreak c6,c1 \
+  "$PY" scripts/eval_quick.py watch --snap-dir "$RUN_DIR/snapshots" --cache "$CACHE" --tiebreak c6,c1 --select c8gate --keep-all \
     --jsonl "$RUN_DIR/quick-eval.jsonl" --best-dir "$RUN_DIR/best" --done-file "$RUN_DIR/TRAIN_DONE" \
     --threads "$EVAL_THREADS" >>"$RUN_DIR/quick-eval.log" 2>&1 &
   WP=$!; echo $WP >"$RUN_DIR/watch.pid"
