@@ -32,16 +32,23 @@ def _grad(f, x):
     return g
 
 
+@pytest.mark.parametrize("compiled", [False, pytest.param(True, marks=pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="torch.compile medido só em CUDA"))])
 @pytest.mark.parametrize("max_freq", ["mixed", "full"])
 @pytest.mark.parametrize("n1", ["some", "none", "all"])
-def test_multires_matches_reference(max_freq, n1):
+def test_multires_matches_reference(max_freq, n1, compiled):
     g = torch.Generator().manual_seed(1)
     B, N = 5, 24_000
+    dev = "cuda" if compiled else "cpu"
     tgt = 0.1 * torch.randn(B, N, generator=g)
     est = tgt + 0.05 * torch.randn(B, N, generator=g)
+    est[:, 5000:9000] = 0.0  # trecho zerado (ZERO do gating): bins com |Y| ≈ 0
+    tgt, est = tgt.to(dev), est.to(dev)
+    fv5.set_compile(compiled)
     mf = torch.tensor([8000.0, 24000.0, 16000.0, 24000.0, 4000.0]) if max_freq == "mixed" else torch.full((B,), 24000.0)
     nint = {"some": torch.tensor([0, 2, 1, 0, 3]), "none": torch.zeros(B, dtype=torch.long),
             "all": torch.ones(B, dtype=torch.long)}[n1]
+    mf, nint = mf.to(dev), nint.to(dev)
     kw = dict(n_ffts=N_FFTS, gamma=0.3)
 
     def ref(e):
@@ -62,6 +69,7 @@ def test_multires_matches_reference(max_freq, n1):
     _close(os_f, os_r)
     for i in range(2):
         _close(_grad(lambda e: fast(e)[i], est), _grad(lambda e: ref(e)[i], est))
+    fv5.set_compile(False)
 
 
 def _spec(g, B=3, T=40, F=481, scale=1.0):

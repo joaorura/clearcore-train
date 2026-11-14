@@ -154,6 +154,8 @@ def parse_args(argv=None):
                    help="workers só sorteiam a receita; mistura, rótulos e features na GPU (cctrain.data.gpu, fora do hash)")
     p.add_argument("--loss-impl", choices=("fast", "ref"), default="fast",
                    help="perdas: fast = sem recomputação/sincronização (mesma matemática, fora do hash); ref = a antiga")
+    p.add_argument("--loss-compile", action="store_true",
+                   help="torch.compile nos termos por resolução de L_mr/L_os (só com --loss-impl fast)")
     return p.parse_args(argv)
 
 
@@ -504,6 +506,8 @@ def main():
             f"parâmetros {json.dumps(counts)} | treináveis {n_tr} ({100 * n_tr / counts['total']:.2f}%)")
     if amp:
         fp32_spectral(model)
+    if a.loss_compile:
+        fv5.set_compile(True)
     if a.compile:
         model.base.erb_dec = torch.compile(model.base.erb_dec, dynamic=False)
         model.base.df_dec = torch.compile(model.base.df_dec, dynamic=False)

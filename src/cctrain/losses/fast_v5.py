@@ -20,7 +20,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
-from cctrain.losses.dfnet import _EPS, SR, _angle, _stft, formant_frequency_weights
+from cctrain.losses.dfnet import _EPS, SR, _stft, formant_frequency_weights
 
 _FW_CACHE: dict = {}
 
@@ -42,42 +42,65 @@ def bin_weights(max_freq: Tensor | float, n_fft: int, batch: int, sr: int, devic
     return (freqs[None, :] <= mf[:, None]).to(torch.float32)
 
 
-def _per_sample(err_ft: Tensor, w: Tensor, mult: int) -> Tensor:
-    """Média por amostra sobre os bins mantidos: `err_ft` `[B, F, T]` já somado na última dim (se complexo)."""
-    num = (err_ft.sum(-1) * w).sum(-1)
-    den = (w.sum(-1) * (err_ft.shape[-1] * mult)).clamp_min(1.0)
-    return num / den
+def _angle_re_im():
+    from cctrain.dfvendor import ensure_df_importable
+
+    ensure_df_importable()
+    from df.utils import angle_re_im  # o mesmo gradiente robusto do `angle` usado por dfnet_loss, em (re, im)
+
+    return angle_re_im
+
+
+def _res_terms(yr: Tensor, s_abs: Tensor, s_c: Tensor, w: Tensor, fw: Tensor, fmask: Tensor, gamma: float,
+               pen: float) -> tuple[Tensor, Tensor, Tensor]:
+    """Termos por amostra `[B]` de uma resolução: (|·|^γ do L_mr, complexo do L_mr, L_os), em aritmética real.
+
+    `yr` = view_as_real(STFT da saída) `[B,F,T,2]`. Equivale a `y.abs().clamp_min(ε).pow(γ)` (= (re²+im²)
+    limitado a ε² elevado a γ/2; o gradiente é zero abaixo de ε nos dois) e a `|y|^γ·exp(i·angle(y))` (cos/sin do
+    `angle_re_im`, mesmo backward do `angle` do upstream). Uma função só, para o torch.compile fundir tudo."""
+    re, im = yr[..., 0], yr[..., 1]
+    p = (re * re + im * im).clamp_min(_EPS * _EPS).pow(gamma / 2)
+    phi = _angle_re_im().apply(re, im)
+    T = yr.shape[-2]
+    den = w.sum(-1).clamp_min(1.0 / T) * T  # Σ bins mantidos × T (≥ 1, como o clamp da referência)
+    mag = ((p - s_abs) ** 2).sum(-1)
+    cpx = ((p * torch.cos(phi) - s_c[..., 0]) ** 2 + (p * torch.sin(phi) - s_c[..., 1]) ** 2).sum(-1)
+    err = F.relu(s_abs - p) ** 2
+    if pen > 0.0:
+        err = err * (1.0 + fmask * pen * err)
+    err = (err * fw).sum(-1)
+    return (mag * w).sum(-1) / den, (cpx * w).sum(-1) / (2 * den), (err * w).sum(-1) / den
+
+
+_RES_TERMS = {"fn": _res_terms}
+
+
+def set_compile(enabled: bool) -> None:
+    """Liga o torch.compile nos termos por resolução (forward e backward fundidos)."""
+    _RES_TERMS["fn"] = torch.compile(_res_terms, dynamic=None) if enabled else _res_terms
 
 
 def multires_mr_os(est: Tensor, tgt: Tensor, max_freq, n1: Tensor, *, n_ffts, gamma: float, factor: float,
                    factor_complex: float, os_factor: float, formant_weight: float, extra_formant_penalty: float = 1.0,
                    sr: int = SR) -> tuple[Tensor, Tensor]:
     """(L_mr, L_os total) — ver docstring do módulo. `n1`: `[B]` 1/0 das amostras com interferente."""
-    if gamma == 1:
-        raise ValueError("multires_mr_os supõe gamma != 1 (o do treino é 0,3)")
-    angle = _angle()
+    if gamma == 1 or not factor_complex:
+        raise ValueError("multires_mr_os supõe gamma != 1 e o termo complexo ligado (o do treino)")
     B = est.shape[0]
     n1 = n1.to(est.dtype)
     mr = torch.zeros((), device=est.device, dtype=est.dtype)
     os_ = torch.zeros((), device=est.device, dtype=est.dtype)
+    fn = _RES_TERMS["fn"]
     for n_fft in n_ffts:
-        y = _stft(est, n_fft)
+        yr = torch.view_as_real(_stft(est, n_fft))
         with torch.no_grad():
             s = _stft(tgt, n_fft)
             s_abs = s.abs().clamp_min(_EPS).pow(gamma)
-            s_c = torch.view_as_real(s_abs * torch.exp(1j * torch.atan2(s.imag, s.real))) if factor_complex else None
-        y_abs = y.abs().clamp_min(_EPS).pow(gamma)
+            s_c = torch.view_as_real(s_abs * torch.exp(1j * torch.atan2(s.imag, s.real)))
         w = bin_weights(max_freq, n_fft, B, sr, est.device)
-        mr = mr + _per_sample((y_abs - s_abs) ** 2, w, 1).mean() * factor
-        if factor_complex:
-            yc = torch.view_as_real(y_abs * torch.exp(1j * angle.apply(y)))
-            mr = mr + _per_sample(((yc - s_c) ** 2).sum(-1), w, 2).mean() * factor_complex
         fw, fmask = formant_weights_cached(n_fft, sr, est.device, formant_weight=formant_weight)
-        err = F.relu(s_abs - y_abs) ** 2
-        if extra_formant_penalty > 0.0:
-            err = err * (1.0 + fmask * extra_formant_penalty * err)
-        err = err * fw
-        per = _per_sample(err, w, 1)
+        mag, cpx, per = fn(yr, s_abs, s_c, w, fw, fmask, gamma, extra_formant_penalty)
+        mr = mr + mag.mean() * factor + cpx.mean() * factor_complex
         os_ = os_ + per.mean() + (per * n1).sum() / B
     return mr, os_ / len(n_ffts) * os_factor
 

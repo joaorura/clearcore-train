@@ -138,6 +138,8 @@ def setup(argv):
     trainable = tp.prepare(model, train_cond)
     if amp:
         tp.fp32_spectral(model)
+    if a.loss_compile:
+        tp.fv5.set_compile(True)
     istft = tp.Istft(960, tp.HOP, torch.as_tensor(tp._fft_window())).to(device)
     return a, device, amp, paths, hp, model, trainable, istft, tp.ModelParams()
 
