@@ -178,7 +178,8 @@ def load_batches(a, device: str, args=None):
     paths = Paths.from_env()
     vp = V4Params(seed=20261114, segment_s=6.0, batch_size=a.batch, total_steps=40_000, phase1_frac=0.0,
                   p_interf_first=0.7, p_turns=0.4, turn_gap_max_s=0.5, p_rir_turns=0.8, p_target_absent=0.20,
-                  pattern_probs=(0.25, 0.40, 0.20, 0.15))
+                  pattern_probs=(0.25, 0.40, 0.20, 0.15),
+                  **({"p_drop": args.p_drop} if args is not None and args.p_drop is not None else {}))
     ds0, _ = T.make_dataset(paths, vp)
     ds = StageV4RecipeDataset(ds0.pools, ds0.bank, ds0.data_root, vp)
     if args is not None and args.profile_drop_mode == "batch":
