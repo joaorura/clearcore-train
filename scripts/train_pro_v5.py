@@ -182,7 +182,8 @@ def parse_args(argv=None):
     p.add_argument("--opt-impl", choices=("default", "foreach", "fused"), default="default", help="implementação do AdamW")
     p.add_argument("--log-every", type=int, default=1,
                    help="lê as perdas no host a cada N passos (1 = original). Com --sync-free e N > 1 a perda não finita "
-                        "pula o passo na GPU (exige --opt-impl fused, found_inf) e a paciência é conferida a cada N")
+                        "pula o passo na GPU (exige --opt-impl fused, found_inf) e a paciência é conferida a cada N; sem sync "
+                        "por passo o s/passo e a espera se misturam (a mistura na GPU sincroniza): vale amostras/s")
     p.add_argument("--loss-impl", choices=("fast", "ref"), default="fast",
                    help="perdas: fast = sem recomputação/sincronização (mesma matemática, fora do hash); ref = a antiga")
     p.add_argument("--loss-compile", action="store_true",
@@ -605,6 +606,9 @@ def main():
         raise SystemExit("--sync-free/--step-mode não suportam --amp fp16 (GradScaler); use bf16")
     if defer and a.opt_impl != "fused":
         raise SystemExit("--log-every > 1 com --sync-free exige --opt-impl fused (pulo de passo não finito na GPU)")
+    if a.step_mode == "graph" and not (a.p_drop == 0 or (a.profile_drop_mode == "batch" and a.skip_off_batches)):
+        log("AVISO: --step-mode graph com lotes mistos/sem perfil: esses passos rodam eager (ou um 2º grafo) ao lado do "
+            "pool do grafo; com B48 na 3090 não cabe. Use --p-drop 0 (ou --profile-drop-mode batch --skip-off-batches)")
     runner = None
     if fast:
         from cctrain.train.v5_fast import StepRunner
@@ -779,10 +783,17 @@ def main():
         waits.append(t0 - tw)
         b = _to_device_nb(batch, device)
         if defer:
-            parts = runner(b, on)
-            if not pkeys:
-                pkeys.extend(parts.keys())
-            nonfin = (~torch.isfinite(parts["total"])).float().reshape(())
+            if a.skip_off_batches and on is False:  # lote todo sem perfil: grad exatamente 0, sem forward
+                parts = None
+                for p_ in trainable:
+                    p_.grad = torch.zeros_like(p_)
+                nonfin = torch.zeros((), device=device)
+                n_skipped += 1
+            else:
+                parts = runner(b, on)
+                if not pkeys:
+                    pkeys.extend(parts.keys())
+                nonfin = (~torch.isfinite(parts["total"])).float().reshape(())
             if world > 1:
                 dist.all_reduce(nonfin, op=dist.ReduceOp.MAX)
                 allreduce_grads(trainable, world)
@@ -791,9 +802,10 @@ def main():
             opt.step()
             sched.step()
             step += 1
-            pend.append((step, time.strftime("%H:%M:%S"),
-                         torch.stack([parts[k].detach().float().reshape(()) for k in pkeys] + [gn.float(), nonfin])))
-            pend_wait.append(waits[-1])
+            if parts is not None:
+                pend.append((step, time.strftime("%H:%M:%S"),
+                             torch.stack([parts[k].detach().float().reshape(()) for k in pkeys] + [gn.float(), nonfin])))
+                pend_wait.append(waits[-1])
             if step % a.log_every == 0 or step <= 3 or step >= end_step:
                 why = flush_pending()
                 if why:
