@@ -11,6 +11,7 @@ Paridade: com o MESMO forward do modelo, valor de cada perda e gradientes dos pa
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import os
 import statistics
@@ -180,6 +181,7 @@ def main():
     ap.add_argument("--iters", type=int, default=6)
     ap.add_argument("--warm", type=int, default=2)
     ap.add_argument("--out", default=None)
+    ap.add_argument("--parity-only", action="store_true")
     ap.add_argument("--train-args", default="", help="argumentos extras do train_pro_v5")
     o = ap.parse_args()
     argv = ["--variant", "P3", "--gpu-mix", "--amp", "bf16", "--global-batch", str(o.batch)] + o.train_args.split()
@@ -223,6 +225,8 @@ def main():
                   for k, v in b.items()}
             fwd_p = tp._forward_v5(model, bp, p_amp)
             pr2 = tp.step_v5_ref(Frozen(model, fwd_p[:4]), istft, params, hp, bp, a, p_amp)
+            hp_rev = dataclasses.replace(hp, fft_sizes=tuple(reversed(hp.fft_sizes)))
+            pr3 = tp.step_v5_ref(Frozen(model, fwd[:4]), istft, params, hp_rev, b, a, p_amp)
             pf = tp.step_v5(model, istft, params, hp, b, a, p_amp, _fwd=fwd)
             for k in ("total",) + LOSS_KEYS + ("g_turn_db", "g_turn_early_db", "g_n0_db", "zero_frac_only_interf",
                                                "zero_frac_target"):
@@ -235,15 +239,20 @@ def main():
                 gr = g(pr, trainable)
                 worst[f"grad_params:{k}"] = max(worst[f"grad_params:{k}"], cmp(g(pf, trainable), gr))
                 worst[f"floor_params_perm:{k}"] = max(worst[f"floor_params_perm:{k}"], cmp(g(pr2, trainable), gr))
+                worst[f"floor_params_fftorder:{k}"] = max(worst[f"floor_params_fftorder:{k}"], cmp(g(pr3, trainable), gr))
                 worst[f"grad_outs:{k}"] = max(worst[f"grad_outs:{k}"], cmp(g(pf, leaves), g(pr, leaves)))
-            del fwd, fwd_p, leaves, pr, pr2, pf
+            del fwd, fwd_p, leaves, pr, pr2, pr3, pf
             torch.cuda.empty_cache()
         report["parity"].append({"amp": bool(p_amp), **worst})
-        print(f"paridade amp={p_amp} (máx. sobre {len(batches)} lotes; rel. L2; floor_perm = ref vs ref com o lote em ordem inversa):",
+        print(f"paridade amp={p_amp} (máx. sobre {len(batches)} lotes; rel. L2; floor_perm/floor_fftorder = ref vs ref com o lote em ordem inversa / as resoluções em ordem inversa):",
               json.dumps(worst, indent=0))
     torch.use_deterministic_algorithms(False)
     torch.backends.cudnn.deterministic, torch.backends.cudnn.benchmark = prev
 
+    if o.parity_only:
+        if o.out:
+            Path(o.out).write_text(json.dumps(report, indent=1))
+        return
     # --- passo inteiro ----------------------------------------------------------------------------------------------
     def full(impl, b, tm):
         tm.start()
