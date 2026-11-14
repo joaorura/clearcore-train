@@ -75,13 +75,16 @@ from cctrain.train.stage_c import _lsnr_target, _to_device  # noqa: E402
 from cctrain.train.stage_f import HOP, StageFHParams, prepare_student  # noqa: E402
 from cctrain.data.mix_v4 import N_PROBS, PATTERN_PROBS, V4Params  # noqa: E402
 from cctrain.data.workers import init_worker  # noqa: E402
+from cctrain.data.gpu.mixer import GpuMixer  # noqa: E402
+from cctrain.data.gpu.recipe import StageV4RecipeDataset, collate_recipes  # noqa: E402
 
 ensure_df_importable()
 from df.loss import Istft  # noqa: E402
 from df.model import ModelParams  # noqa: E402
 
 GIB = 1024**3
-DATA_TAG = "mix_v4 com fix dry-gain 0145934"  # o fix não muda o hash do V4Params: fica explícito no hash do run
+DATA_TAG = "mix_v4 fix dry-gain 0145934"  # o fix não muda o hash do V4Params: fica explícito no hash do run
+GPU_MIX_TAG = "gpu-mix 56bc2f5"  # equivalente ao caminho CPU (fora do hash); registrado no log/extra/summary
 TERMS = ("mr", "os", "leak", "leak_abs", "tail", "ovl", "lsnr", "turn", "n0g", "df_reg")
 REF_BATCH = 12
 VARIANTS = {  # base, treina condicionamento, gru_rank, enc_rank
@@ -146,6 +149,8 @@ def parse_args(argv=None):
                    help="snapshot para o eval_quick a cada N amostras (padrão 1.000 passos × 12; 0 desliga)")
     p.add_argument("--runs-subdir", default="m4")
     p.add_argument("--device", default="cuda")
+    p.add_argument("--gpu-mix", action="store_true",
+                   help="workers só sorteiam a receita; mistura, rótulos e features na GPU (cctrain.data.gpu, fora do hash)")
     return p.parse_args(argv)
 
 
@@ -343,7 +348,8 @@ def main():
     if is0:
         log(f"run {a.run_id} -> {run_dir} | {device} × {world} ranks | batch global {a.global_batch} ({bl}/rank) | "
             f"passos {total_steps} | warmup {warmup} | eval a cada {eval_every} | lr {lr:.2e} | amp {amp} | "
-            f"workers/rank {workers} (cpus {ncpu}) | dados: {DATA_TAG} | pid {os.getpid()}")
+            f"workers/rank {workers} (cpus {ncpu}) | dados: {DATA_TAG}{' + ' + GPU_MIX_TAG if a.gpu_mix else ''} | "
+            f"pid {os.getpid()}")
     stop = {"flag": False, "why": ""}
 
     def on_signal(signum, _frame):
@@ -405,9 +411,18 @@ def main():
     if is0:
         log(f"pools: {json.dumps(pl.stats)} | v4 {json.dumps(vp.hashable())}")
     sampler = [s * a.global_batch + rank * bl + k for s in range(step, total_steps) for k in range(bl)]
+    mixer = None
+    if a.gpu_mix:
+        ds = StageV4RecipeDataset(ds.pools, ds.bank, ds.data_root, vp)
+        mixer = GpuMixer.from_dataset(ds, device)
+        if is0:
+            log(f"--gpu-mix: receitas nos workers, mistura/rótulos/features em {device}")
     dl = DataLoader(ds, batch_size=bl, sampler=sampler, num_workers=workers,
                     prefetch_factor=a.prefetch if workers else None, persistent_workers=workers > 0,
-                    pin_memory=device.startswith("cuda"), worker_init_fn=init_worker)
+                    pin_memory=device.startswith("cuda"), worker_init_fn=init_worker,
+                    collate_fn=collate_recipes if mixer else None)
+    n_refill = 0
+    data_tag = DATA_TAG + (f" + {GPU_MIX_TAG}" if mixer else "")
 
     t_start = time.monotonic()
     last_ckpt = t_start
@@ -424,7 +439,7 @@ def main():
         pth = save_checkpoint(directory, step=step, model=model.state_dict(), optimizer=opt, scheduler=sched,
                               keep=keep, sampler_state={"step": step}, cfg_hash=chash, commit=commit,
                               extra={"elapsed_s": elapsed(), "reason": reason, "args": vars(a), "v4": vp.hashable(),
-                                     "presence_head": False, "adapter": acfg.to_dict(), "data": DATA_TAG, "base": base_kind,
+                                     "presence_head": False, "adapter": acfg.to_dict(), "data": data_tag, "base": base_kind,
                                      "init": init_desc, "train_cond": train_cond, "world": world,
                                      "gating": {"mode": "lsnr-profile", "zero_below_db": -10.0},
                                      "wall": time.strftime("%Y-%m-%d %H:%M:%S")})
@@ -445,6 +460,11 @@ def main():
         except StopIteration:
             stop_reason = "data_end"
             break
+        if mixer is not None:  # a mistura na GPU conta como espera por dados
+            batch = mixer(batch)
+            n_refill += mixer.fill_invalid(batch, ds)
+            batch.pop("valid")
+            batch.pop("index")
         t0 = time.perf_counter()
         waits.append(t0 - tw)
         b = _to_device_nb(batch, device)
@@ -516,7 +536,7 @@ def main():
         save("eval-snapshot-final", snap_dir, keep=10_000)
     if is0:
         summary = {"run_id": a.run_id, "step": step, "stop_reason": stop_reason, "elapsed_s": elapsed(),
-                   "world": world, "global_batch": a.global_batch, "amp": amp, "data": DATA_TAG,
+                   "world": world, "global_batch": a.global_batch, "amp": amp, "data": data_tag, "gpu_mix_cpu_refills": n_refill if mixer else None,
                    "s_per_step_median": statistics.median(step_times) if step_times else None,
                    "loader_wait_median": statistics.median(waits) if waits else None,
                    "samples_per_s": (a.global_batch / (statistics.median(step_times) + statistics.median(waits)))

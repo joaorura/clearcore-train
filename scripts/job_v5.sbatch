@@ -16,6 +16,7 @@
 #   mais GPUs depois:     scancel <job>; RUN_ID=pro-v5-p3 sbatch -c 24 --gres=gpu:3 scripts/job_v5.sbatch
 #   (o scancel manda TERM: o treino salva e sai; o novo job retoma.)
 # CPUs: EVAL_THREADS (2) para o avaliador; o resto dividido entre os ranks (1 processo de treino + workers de dados).
+# Com --gpu-mix (mistura/rótulos/features na GPU) ~4 CPUs por GPU bastam: ex. -c 14 --gres=gpu:3.
 set -euo pipefail
 W=/mnt/4tb-nvme/work/joaorura
 ROOT=$W/clearcore-train                   # clone principal: dados (data/) e manifests ignorados
@@ -45,11 +46,10 @@ source scripts/env.sh 2>/dev/null || true
 echo "[$(date '+%F %T')] job ${SLURM_JOB_ID:-?} | GPUs $NG (${CUDA_VISIBLE_DEVICES:-?}) | CPUs $CPUS | workers/rank $WPR | commit $(git rev-parse --short HEAD) | run $RUN_DIR"
 
 CMD=("$PY" -m torch.distributed.run --standalone --nproc_per_node "$NG" scripts/train_pro_v5.py
-     --run-id "$RUN_ID" --runs-subdir . --workers "$WPR" "$@")
-{ echo "${CMD[*]}"; echo "commit $(git rev-parse HEAD) | dados: mix_v4 com fix dry-gain 0145934"; } >"$RUN_DIR/launch-cmd.txt"
-OMP_NUM_THREADS=1 "${CMD[@]}" >>"$RUN_DIR/train.log" 2>&1 &
-TP=$!
-echo $TP >"$RUN_DIR/train.pid"
+     --run-id "$RUN_ID" --runs-subdir . --workers "$WPR" --ckpt-every-min 10 "$@")
+{ echo "${CMD[*]}"; echo "commit $(git rev-parse HEAD) | job ${SLURM_JOB_ID:-?} | GPUs $NG | CPUs $CPUS"
+  echo "dados: mix_v4 fix dry-gain 0145934$(printf '%s ' "$@" | grep -q -- --gpu-mix && echo ' + gpu-mix 56bc2f5')"
+} >>"$RUN_DIR/launch-cmd.txt"
 
 WP=""
 if [ "$QUICK_EVAL" = 1 ]; then
@@ -59,16 +59,35 @@ if [ "$QUICK_EVAL" = 1 ]; then
   WP=$!; echo $WP >"$RUN_DIR/watch.pid"
 fi
 
+# Relançamento automático: se o treino cair sem terminar (ex.: worker do DataLoader com "could not unlink the shared
+# memory file", que matou o v42-voz no passo 2250), relança e retoma do último checkpoint, até MAX_RESTARTS vezes.
+# Causa provável daquele erro: systemd-logind RemoveIPC=yes apaga o /dev/shm do usuário quando a última sessão de login
+# (ssh) dele termina; mitigado com `loginctl enable-linger joaorura` (feito em 13/11/2026), e este laço cobre o resto.
+MAX_RESTARTS="${MAX_RESTARTS:-6}"
+got_term=0
+TP=""
 forward() {
+  got_term=1
   echo "[$(date '+%F %T')] sinal recebido: TERM -> treino $TP (salva e sai)"
-  kill -TERM "$TP" 2>/dev/null || true
+  [ -n "$TP" ] && kill -TERM "$TP" 2>/dev/null || true
 }
 trap forward TERM INT
 rc=0
-while kill -0 "$TP" 2>/dev/null; do
-  wait "$TP" || rc=$?
+for attempt in $(seq 0 "$MAX_RESTARTS"); do
+  rm -f "$RUN_DIR/TRAIN_DONE"
+  echo "[$(date '+%F %T')] tentativa $attempt" >>"$RUN_DIR/train.log"
+  OMP_NUM_THREADS=1 "${CMD[@]}" >>"$RUN_DIR/train.log" 2>&1 &
+  TP=$!
+  echo $TP >"$RUN_DIR/train.pid"
+  rc=0
+  while kill -0 "$TP" 2>/dev/null; do
+    wait "$TP" || rc=$?
+  done
+  echo "[$(date '+%F %T')] treino saiu (rc=$rc, tentativa $attempt); $(cat "$RUN_DIR/TRAIN_DONE" 2>/dev/null || echo 'sem TRAIN_DONE')"
+  [ "$got_term" = 1 ] && break
+  grep -qE '^(total_steps|max_steps|nan|nan_params|data_end)' "$RUN_DIR/TRAIN_DONE" 2>/dev/null && break
+  sleep 30
 done
-echo "[$(date '+%F %T')] treino saiu (rc=$rc); $(cat "$RUN_DIR/TRAIN_DONE" 2>/dev/null || echo 'sem TRAIN_DONE')"
 
 # só roda o eval completo se o treino chegou ao fim (não em parada por sinal/tempo, que será retomada)
 if [ "$QUICK_EVAL" = 1 ] && grep -q '^total_steps' "$RUN_DIR/TRAIN_DONE" 2>/dev/null; then
