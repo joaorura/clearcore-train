@@ -302,6 +302,20 @@ def build_v5(a, device: str, hp: StageFHParams, paths: Paths):
     return model, cfg, sites, base, train_cond, init_desc
 
 
+def fp32_spectral(model) -> None:
+    """Com bf16 autocast, a parte espectral da base (máscara ERB e filtro DF, que usam view_as_complex) roda em fp32:
+    troca o `forward` da instância (as chaves do state_dict não mudam)."""
+    for mod in (model.base.mask, model.base.df_op):
+        orig = mod.forward
+
+        def fwd(*args, _orig=orig, **kw):
+            with torch.autocast("cuda", enabled=False):
+                cast = [x.float() if torch.is_tensor(x) and x.is_floating_point() else x for x in args]
+                return _orig(*cast, **{k: (v.float() if torch.is_tensor(v) and v.is_floating_point() else v)
+                                       for k, v in kw.items()})
+        mod.forward = fwd
+
+
 def prepare(model, train_cond: bool) -> list:
     prepare_student(model)  # BN em eval/congelada, RNN em train (backward do cuDNN)
     return apply_trainable(model, train_cond=train_cond, train_adapters=True)
@@ -370,6 +384,8 @@ def main():
     if is0:
         log(f"base {base_kind} ({init_desc}) | variante {a.variant} | adaptadores {acfg.to_dict()} | sítios {sites} | "
             f"parâmetros {json.dumps(counts)} | treináveis {n_tr} ({100 * n_tr / counts['total']:.2f}%)")
+    if amp:
+        fp32_spectral(model)
     if a.compile:
         model.base.erb_dec = torch.compile(model.base.erb_dec, dynamic=False)
         model.base.df_dec = torch.compile(model.base.df_dec, dynamic=False)
