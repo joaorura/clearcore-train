@@ -174,6 +174,7 @@ def main():
     ap.add_argument("--cache", required=True)
     ap.add_argument("--dump", type=int, default=0)
     ap.add_argument("--batch", type=int, default=48)
+    ap.add_argument("--parity-batch", type=int, default=12, help="amostras por lote na paridade (memória)")
     ap.add_argument("--iters", type=int, default=6)
     ap.add_argument("--warm", type=int, default=2)
     ap.add_argument("--out", default=None)
@@ -210,6 +211,8 @@ def main():
     for p_amp in (False, amp):
         worst = defaultdict(float)
         for b in batches:
+            b = {k: (v[: o.parity_batch] if torch.is_tensor(v) and v.ndim and v.shape[0] == o.batch else v)
+                 for k, v in b.items()}
             fwd = tp._forward_v5(model, b, p_amp)
             leaves = list(fwd[:4])
             pr = tp.step_v5_ref(Frozen(model, fwd[:4]), istft, params, hp, b, a, p_amp)
@@ -228,6 +231,7 @@ def main():
                     worst[f"grad_{tag}:{k}"] = max(worst[f"grad_{tag}:{k}"], cmp(g(pf, wrt), gr))
                     worst[f"noise_{tag}:{k}"] = max(worst[f"noise_{tag}:{k}"], cmp(g(pr2, wrt), gr))
             del fwd, leaves, pr, pr2, pf
+            torch.cuda.empty_cache()
         report["parity"].append({"amp": bool(p_amp), **worst})
         print(f"paridade amp={p_amp} (máx. sobre {len(batches)} lotes; rel. L2; noise = ref vs ref):",
               json.dumps(worst, indent=0))
