@@ -28,12 +28,12 @@ EARLY_MS = 50.0
 _PADLEN = 27  # scipy.sosfiltfilt: 3 * (2 * n_sections + 1) com 4 seções de ordem 2 sem zeros/polos na origem
 
 
-def ramp_env(on: torch.Tensor, n: int, ramp: int = 480) -> torch.Tensor:
+def ramp_env(on: torch.Tensor, n: int, ramp: int = 480, dtype: torch.dtype = torch.float64) -> torch.Tensor:
     """Envelope por amostra (0/1 por quadro, `on` bool `[M, F]`) com rampas de `ramp` amostras: média móvel por soma
     acumulada, saída[i] = média de env[i-(ramp-1-(ramp-1)//2) .. i+(ramp-1)//2], fora = 0 (ramp=480: [i-240, i+239]),
     o mesmo alinhamento de `np.convolve(..., 'same')`. Retorna float64 `[M, n]` em [0, 1]."""
     m = on.shape[0]
-    env = on.to(torch.float64).repeat_interleave(HOP, dim=1)[:, :n]
+    env = on.to(dtype).repeat_interleave(HOP, dim=1)[:, :n]
     if env.shape[1] < n:
         env = torch.nn.functional.pad(env, (0, n - env.shape[1]))
     if ramp > 1:
@@ -41,7 +41,7 @@ def ramp_env(on: torch.Tensor, n: int, ramp: int = 480) -> torch.Tensor:
             raise ValueError("ramp_env: n < ramp não suportado (o 'same' do numpy troca os papéis nesse caso)")
         right = (ramp - 1) // 2
         left = ramp - 1 - right
-        c = torch.zeros(m, n + ramp, dtype=torch.float64, device=env.device)
+        c = torch.zeros(m, n + ramp, dtype=dtype, device=env.device)
         c[:, left + 1 : left + 1 + n] = torch.cumsum(env, dim=1)
         c[:, left + 1 + n :] = c[:, left + n : left + n + 1]
         env = (c[:, ramp : ramp + n] - c[:, :n]) / ramp
@@ -58,12 +58,12 @@ def fft_conv(x: torch.Tensor, h: torch.Tensor, h_len: torch.Tensor, *, chunk: in
     keep = torch.arange(length, device=h.device)[None, :] < h_len.to(h.device)[:, None]
     h = torch.where(keep, h, torch.zeros((), dtype=h.dtype, device=h.device)).to(torch.float32)
     nfft = next_fast_len(n + length - 1, real=True)
-    out = torch.empty(m, n, dtype=torch.float64, device=x.device)
+    out = torch.empty(m, n, dtype=x.dtype, device=x.device)
     for s in range(0, m, chunk):
         e = min(s + chunk, m)
         fx = torch.fft.rfft(x[s:e].to(torch.float32), n=nfft, dim=1)
         fh = torch.fft.rfft(h[s:e], n=nfft, dim=1)
-        out[s:e] = torch.fft.irfft(fx * fh, n=nfft, dim=1)[:, :n].to(torch.float64)
+        out[s:e] = torch.fft.irfft(fx * fh, n=nfft, dim=1)[:, :n].to(x.dtype)
     return out
 
 
@@ -80,7 +80,7 @@ def pink_from_white(w: torch.Tensor) -> torch.Tensor:
     por trilha."""
     n = w.shape[1]
     spec = torch.fft.rfft(w, dim=1)
-    f = torch.arange(spec.shape[1], dtype=torch.float64, device=w.device)
+    f = torch.arange(spec.shape[1], dtype=w.dtype, device=w.device)
     f[0] = 1.0
     x = torch.fft.irfft(spec / torch.sqrt(f), n=n, dim=1)
     return x / (torch.sqrt(torch.mean(x**2, dim=1, keepdim=True)) + 1e-20)
@@ -98,6 +98,23 @@ def _sos_for(cutoffs: np.ndarray) -> np.ndarray:
         if fc not in cache:
             cache[fc] = butter(8, fc / NYQUIST_HZ, output="sos")
         out[i] = cache[fc]
+    return out
+
+
+def _on_default_stream(fn):
+    """O kernel CUDA do `torchaudio.functional.lfilter` roda na stream padrão (legada), não na corrente: numa
+    `torch.cuda.Stream` lateral (`--gpu-mix-overlap`) ele leria a entrada antes de pronta e a saída seria lida antes de
+    escrita (NaN/lixo). Roda o lfilter inteiro na padrão, sincronizada com a corrente antes e depois; sem custo quando a corrente já é a padrão."""
+    if not torch.cuda.is_available():
+        return fn()
+    cur, dflt = torch.cuda.current_stream(), torch.cuda.default_stream()
+    if cur == dflt:
+        return fn()
+    dflt.wait_stream(cur)
+    with torch.cuda.stream(dflt):  # tudo (também o pad/cópias internos do lfilter) na padrão, depois da entrada
+        out = fn()
+    cur.wait_stream(dflt)
+    out.record_stream(cur)  # memória alocada na padrão, consumida pela corrente
     return out
 
 
@@ -127,7 +144,7 @@ def _sos_pass(y: torch.Tensor, sos: torch.Tensor, warm: int, chunk: int) -> torc
         b, a = b / a[:, :1], a / a[:, :1]
         g = b.sum(dim=1, keepdim=True) / a.sum(dim=1, keepdim=True)
         z0 = z[:, :1]
-        z = taf.lfilter(z - z0, a, b, clamp=False, batching=True) + g * z0
+        z = _on_default_stream(lambda: taf.lfilter(z - z0, a, b, clamp=False, batching=True)) + g * z0
     return z[:, warm:].reshape(k, nc * chunk)[:, :t]
 
 
@@ -139,7 +156,7 @@ def _warm_len(sos: np.ndarray) -> int:
     return int(math.ceil(1.5 * math.log(1e-16) / math.log(r)))
 
 
-def lowpass48(x: torch.Tensor, cutoff_hz: torch.Tensor) -> torch.Tensor:
+def lowpass48(x: torch.Tensor, cutoff_hz: torch.Tensor, dtype: torch.dtype = torch.float64) -> torch.Tensor:
     """Passa-baixa Butterworth de ordem 8, fase zero (`sosfiltfilt`: extensão ímpar de 27 amostras, zi de regime,
     filtro direto + reverso) para 48 kHz, em lote. `x` f32 `[M, n]`, `cutoff_hz` f64 `[M]` (corte por linha; linhas com
     corte >= 0,999 * 24 kHz voltam inalteradas, como a CPU). Filtragem em float64, saída float32. Paridade com
@@ -154,8 +171,8 @@ def lowpass48(x: torch.Tensor, cutoff_hz: torch.Tensor) -> torch.Tensor:
         raise ValueError(f"lowpass48: n={n} <= padlen={_PADLEN}")
     out = x.clone()
     idx = torch.as_tensor(act, device=x.device)
-    sos = torch.as_tensor(_sos_for(cut[act]), device=x.device)
-    xs = x[idx].to(torch.float64)
+    sos = torch.as_tensor(_sos_for(cut[act]), device=x.device, dtype=dtype)
+    xs = x[idx].to(dtype)
     ext = torch.cat(
         [
             2 * xs[:, :1] - xs[:, 1 : _PADLEN + 1].flip(1),

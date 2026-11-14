@@ -32,8 +32,15 @@ def _scatter_or(mask: Tensor, idx: Tensor, B: int) -> Tensor:
 
 
 class GpuMixer:
-    def __init__(self, rirs: list[np.ndarray], early_lens: list[int], device: str | torch.device = "cuda"):
+    def __init__(self, rirs: list[np.ndarray], early_lens: list[int], device: str | torch.device = "cuda",
+                 dtype: torch.dtype = torch.float64, lp_dtype: torch.dtype | None = None,
+                 label_dtype: torch.dtype | None = None):
+        """`dtype`: sinais da mistura (float64 = paridade com o CPU; float32 é mais rápido, ~1e-6 relativo).
+        `lp_dtype`/`label_dtype`: dtype do passa-baixa IIR do ruído e dos rótulos/níveis por quadro (padrão: `dtype`)."""
         self.device = torch.device(device)
+        self.dtype = dtype
+        self.lp_dtype = lp_dtype or dtype
+        self.label_dtype = label_dtype or dtype
         L = max((len(h) for h in rirs), default=1)
         H = np.zeros((max(len(rirs), 1), L), np.float32)
         for j, h in enumerate(rirs):
@@ -43,17 +50,23 @@ class GpuMixer:
         self.elen = torch.as_tensor(list(early_lens) or [1], dtype=torch.long, device=self.device)
 
     @classmethod
-    def from_dataset(cls, ds, device="cuda") -> GpuMixer:
+    def from_dataset(cls, ds, device="cuda", **kw) -> GpuMixer:
         """RIRs (48 kHz f32) e comprimentos "early" exatamente como o CPU (`early_rir`: pico + 50 ms)."""
         cache = ds._rirs()
         hs = [cache[rel][0] for rel in ds.pools.rirs]
-        return cls(hs, [len(cache[rel][1]) for rel in ds.pools.rirs], device)
+        return cls(hs, [len(cache[rel][1]) for rel in ds.pools.rirs], device, **kw)
 
     @torch.no_grad()
     def __call__(self, rb: dict, debug: bool = False) -> dict:
-        dev = self.device
+        dev, dt, ldt = self.device, self.dtype, self.label_dtype
         g_ = lambda k: rb[k].to(dev, non_blocking=True)  # noqa: E731
-        dry = g_("dry")
+        if "dry_packed" in rb:  # collate_recipes(sparse=True): reexpande os quadros enviados, o resto é zero
+            M_, n_ = (int(v) for v in rb["dry_shape"])
+            dry = torch.zeros(M_, n_ // HOP, HOP, dtype=torch.float32, device=dev)
+            dry[g_("dry_m"), g_("dry_f")] = g_("dry_packed")
+            dry = dry.reshape(M_, n_)
+        else:
+            dry = g_("dry")
         M, n = dry.shape
         F = n // HOP
         B = rb["index"].shape[0]
@@ -63,7 +76,7 @@ class GpuMixer:
         pres_t = present[tb]
 
         # envelope de turno e RIR (molhada / caminho direto + 50 ms)
-        x = dry.double() * dsp.ramp_env(g_("on")[tb, tk], n)
+        x = dry.to(dt) * dsp.ramp_env(g_("on")[tb, tk], n, dtype=dt)
         wet, early = x.clone(), x.clone()
         rv = g_("reverb")[tb]
         if bool(rv.any()):
@@ -74,7 +87,7 @@ class GpuMixer:
             early[sel] = dsp.fft_conv(x[sel], h, self.elen[r])
 
         # SIR contra o nível ativo do alvo; alvo ausente: interferentes 2.. a ±6 dB do primeiro
-        lv = labels.active_rms_db(wet, F)
+        lv = labels.active_rms_db(wet, F, ldt).double()  # ganhos/níveis por trilha sempre em f64 (vetores pequenos)
         t_db = torch.full((B,), NEG, dtype=torch.float64, device=dev)
         t_db[tb[is_t]] = lv[is_t]
         r_db = torch.full((B,), NEG, dtype=torch.float64, device=dev)
@@ -85,47 +98,47 @@ class GpuMixer:
         g_pres = torch.pow(10.0, (t_db[tb] - sir - lv) / 20.0)
         g_abs = torch.where(tk >= 2, torch.pow(10.0, (r_db[tb] + rel - lv) / 20.0), torch.ones_like(lv))
         g_tr = torch.where(is_i, torch.where(pres_t, g_pres, g_abs), torch.ones_like(lv))
-        wet *= g_tr[:, None]
-        early *= g_tr[:, None]
+        wet *= g_tr[:, None].to(dt)
+        early *= g_tr[:, None].to(dt)
         bad = torch.zeros(B, dtype=torch.int32, device=dev)
         bad.index_add_(0, tb, (lv < -150).to(torch.int32))
 
-        speech = torch.zeros(B, n, dtype=torch.float64, device=dev).index_add_(0, tb, wet)
-        interf_sum = torch.zeros(B, n, dtype=torch.float64, device=dev).index_add_(0, tb[is_i], wet[is_i])
-        tgt_wet = torch.zeros(B, n, dtype=torch.float64, device=dev)
+        speech = torch.zeros(B, n, dtype=dt, device=dev).index_add_(0, tb, wet)
+        interf_sum = torch.zeros(B, n, dtype=dt, device=dev).index_add_(0, tb[is_i], wet[is_i])
+        tgt_wet = torch.zeros(B, n, dtype=dt, device=dev)
         tgt_wet[tb[is_t]] = wet[is_t]
-        ref_db = labels.active_rms_db(torch.where(present[:, None], tgt_wet, interf_sum), F)
+        ref_db = labels.active_rms_db(torch.where(present[:, None], tgt_wet, interf_sum), F, ldt).double()
         valid = (bad == 0) & (ref_db >= -150)
 
         # ruído: SNR contra a referência (alvo, ou interferentes com alvo ausente)
         val = g_("noise_val")
-        noise = torch.zeros(B, n, dtype=torch.float64, device=dev)
+        noise = torch.zeros(B, n, dtype=dt, device=dev)
         nb = g_("noise_b")
         if nb.numel():
-            nz = dsp.lowpass48(g_("noise").float(), g_("lp_cut")[nb]).double()
-            nz_db = _db(torch.mean(nz**2, dim=1))
-            noise[nb] = nz * torch.pow(10.0, (ref_db[nb] - val[nb] - nz_db) / 20.0)[:, None]
+            nz = dsp.lowpass48(g_("noise").float(), g_("lp_cut")[nb], dtype=self.lp_dtype).to(dt)
+            nz_db = _db(torch.mean(nz.double() ** 2, dim=1)) if dt != torch.float64 else _db(torch.mean(nz**2, dim=1))
+            noise[nb] = nz * torch.pow(10.0, (ref_db[nb] - val[nb] - nz_db) / 20.0)[:, None].to(dt)
         g = torch.pow(10.0, (g_("level_db") - ref_db) / 20.0)
-        noisy = (speech + noise) * g[:, None]
-        early *= g[tb][:, None]
-        floor = torch.zeros(B, n, dtype=torch.float64, device=dev) if debug else None
+        noisy = (speech + noise) * g[:, None].to(dt)
+        early *= g[tb][:, None].to(dt)
+        floor = torch.zeros(B, n, dtype=dt, device=dev) if debug else None
         fb = g_("floor_white_b")
         if fb.numel():
-            w = g_("floor_white").double()
+            w = g_("floor_white").to(dt)
             pk_ = g_("floor_pink")[fb]
             if bool(pk_.any()):
                 w[pk_] = dsp.pink_from_white(w[pk_])
-            fl = w * torch.pow(10.0, val[fb] / 20.0)[:, None]
+            fl = w * torch.pow(10.0, val[fb] / 20.0)[:, None].to(dt)
             noisy[fb] += fl
             if debug:
                 floor[fb] = fl
-        pk = noisy.abs().amax(dim=1)
+        pk = noisy.abs().amax(dim=1).double()
         lim = torch.where(pk > 0, torch.clamp(PEAK_LIMIT / pk.clamp(min=1e-300), max=1.0), torch.ones_like(pk))
-        noisy *= lim[:, None]
-        early *= lim[tb][:, None]
-        tgt = torch.zeros(B, n, dtype=torch.float64, device=dev)
+        noisy *= lim[:, None].to(dt)
+        early *= lim[tb][:, None].to(dt)
+        tgt = torch.zeros(B, n, dtype=dt, device=dev)
         tgt[tb[is_t]] = early[is_t]
-        int_ref = torch.zeros(B, n, dtype=torch.float64, device=dev).index_add_(0, tb[is_i], early[is_i])
+        int_ref = torch.zeros(B, n, dtype=dt, device=dev).index_add_(0, tb[is_i], early[is_i])
         mask0 = g_("mask0")
         noisy32 = noisy.float()
 
@@ -133,11 +146,11 @@ class GpuMixer:
         spec_clean = features.analysis(torch.where(mask0[:, None], tgt + int_ref, tgt).float())
         spec_interf = features.analysis(int_ref.float())
 
-        t_act = labels.rel_activity(tgt, F) & present[:, None]
-        i_act = _scatter_or(labels.rel_activity(early[is_i], F), tb[is_i], B)
-        wet_i = wet[is_i] * (g * lim)[tb[is_i]][:, None]
-        i_act45 = _scatter_or(labels.rel_activity(wet_i, F, range_db=45.0), tb[is_i], B)
-        dsil = labels.digital_silence(noisy32, F)
+        t_act = labels.rel_activity(tgt, F, dtype=ldt) & present[:, None]
+        i_act = _scatter_or(labels.rel_activity(early[is_i], F, dtype=ldt), tb[is_i], B)
+        wet_i = wet[is_i] * (g * lim)[tb[is_i]][:, None].to(dt)
+        i_act45 = _scatter_or(labels.rel_activity(wet_i, F, range_db=45.0, dtype=ldt), tb[is_i], B)
+        dsil = labels.digital_silence(noisy32, F, ldt)
 
         s = g_("sirs").clone()
         s[torch.isnan(s)] = float("inf")
@@ -155,7 +168,7 @@ class GpuMixer:
             "valid": valid, "index": g_("index"),
         }
         if debug:
-            wsum = torch.zeros(B, n, dtype=torch.float64, device=dev).index_add_(0, tb[is_i], wet_i)
+            wsum = torch.zeros(B, n, dtype=dt, device=dev).index_add_(0, tb[is_i], wet_i)
             out["debug"] = {"noisy": noisy, "tgt": tgt, "int_ref": int_ref, "interf_wet": wsum,
                             "noise": (noise * g[:, None] + floor) * lim[:, None], "ref_db": ref_db, "lim": lim,
                             "g": g, "track_lv": lv, "track_g": g_tr}
