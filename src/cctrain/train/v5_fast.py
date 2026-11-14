@@ -329,6 +329,10 @@ class StepRunner:
             kw = {"mode": compile_mode} if compile_mode and compile_mode != "default" else {}
             self._fn = torch.compile(self._loss, dynamic=False, **kw)
         self.graphs: dict = {}
+        # pool de memória comum aos grafos (com/sem perfil): nunca rodam juntos, e as saídas de um (perdas, grads) são
+        # consumidas antes do replay do outro. Um grafo pode sobrescrever as saídas do outro, nunca as próprias.
+        self.share_pool = getattr(a, "graph_pool", "separate") == "shared"
+        self._pool = None
         self._primed = False
 
     def _loss(self, b: dict) -> dict:
@@ -381,7 +385,9 @@ class StepRunner:
             s = torch.cuda.Stream()
             s.wait_stream(torch.cuda.current_stream())
             with torch.cuda.stream(s):
-                for _ in range(self.warmup):
+                # 2º grafo com pool compartilhado: sem aquecimento eager (o pool do 1º já guarda as ativações; o eager
+                # ao lado dobraria o pico). Handles do cuDNN/cuBLAS e caches já existem desde o 1º.
+                for _ in range(0 if (self.share_pool and self._pool is not None) else self.warmup):
                     for p in self.trainable:
                         p.grad = None
                     self._loss(static_b)["total"].backward()
@@ -391,11 +397,14 @@ class StepRunner:
             torch.cuda.synchronize()
             torch.cuda.empty_cache()  # devolve o cache do caminho eager: o pool do grafo guarda todas as ativações
             graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(graph, capture_error_mode="thread_local"):  # thread do pin_memory
+            with torch.cuda.graph(graph, pool=self._pool if self.share_pool else None,
+                                  capture_error_mode="thread_local"):  # thread do pin_memory
                 parts = self._loss(static_b)
                 parts["total"].backward()
             grads = [p.grad for p in self.trainable]
             parts = {k: v.detach() for k, v in parts.items()}
+            if self.share_pool and self._pool is None:
+                self._pool = graph.pool()
         finally:
             self._set_static(None)
         return static_b, graph, parts, grads

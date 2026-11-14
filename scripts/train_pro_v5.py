@@ -113,6 +113,15 @@ def parse_args(argv=None):
     p.add_argument("--alpha-over-rank", type=float, default=1.0, help="escala s = alpha/rank do LoRA")
     p.add_argument("--gru-film", action="store_true", help="FiLM do embedding na saída das GRUs (zero-init)")
     p.add_argument("--no-train-cond", action="store_true", help="congela também o condicionamento (só adaptadores)")
+    p.add_argument("--train-base", choices=("frozen", "all", "gru"), default="frozen",
+                   help="fine-tuning da base DFNet3: frozen (padrão, v5), all (base inteira, exceto BatchNorm) ou gru "
+                        "(só os pesos das 3 GRUs). Base em grupo próprio do AdamW (--lr-base, weight decay 0); o caminho "
+                        "sem perfil deixa de ser bit-idêntico ao DFNet3: use --p-drop > 0 (âncora de denoise sem perfil)")
+    p.add_argument("--lr-base", type=float, default=1e-5,
+                   help="LR EFETIVA da base com --train-base all/gru (sem a escala sqrt do --lr), mesmo warmup/cosseno")
+    p.add_argument("--graph-pool", choices=("separate", "shared"), default="shared",
+                   help="--step-mode graph com 2 grafos (com/sem perfil): pool de memória compartilhado entre eles (os "
+                        "grafos nunca rodam juntos e as saídas de cada um são consumidas antes do replay seguinte)")
     p.add_argument("--global-batch", type=int, default=48, help="batch global (repartido entre os ranks)")
     p.add_argument("--total-samples", type=int, default=40_000 * REF_BATCH, help="orçamento (40k passos × 12)")
     p.add_argument("--total-steps", type=int, default=None, help="sobrepõe total-samples/global-batch")
@@ -577,9 +586,42 @@ def maybe_compile(model, a) -> None:
     model.base.df_dec = torch.compile(model.base.df_dec, **kw)
 
 
-def prepare(model, train_cond: bool) -> list:
+def base_trainable_names(model, mode: str) -> list[str]:
+    """Nomes dos parâmetros da base DFNet3 descongelados por --train-base (BatchNorm sempre congelada)."""
+    if mode == "frozen":
+        return []
+    from cctrain.models.adapters import GRU_SITES
+
+    bn = set()
+    for mn, m in model.named_modules():
+        if isinstance(m, torch.nn.modules.batchnorm._BatchNorm):
+            bn |= {f"{mn}.{pn}" for pn, _ in m.named_parameters(recurse=False)}
+    names = [n for n in param_groups(model)["base"] if n not in bn]
+    if mode == "gru":
+        pre = tuple(f"base.{s}." for s in GRU_SITES)
+        names = [n for n in names if n.startswith(pre)]
+    return names
+
+
+def prepare(model, train_cond: bool, train_base: str = "frozen") -> list:
+    """Treináveis: [novas camadas (cond + adaptadores)] + [base descongelada], nesta ordem (ver opt_groups)."""
     prepare_student(model)  # BN em eval/congelada, RNN em train (backward do cuDNN)
-    return apply_trainable(model, train_cond=train_cond, train_adapters=True)
+    new = apply_trainable(model, train_cond=train_cond, train_adapters=True)
+    named = dict(model.named_parameters())
+    base = [named[n] for n in base_trainable_names(model, train_base)]
+    for p in base:
+        p.requires_grad_(True)
+    model._n_new_trainable = len(new)
+    return new + base
+
+
+def opt_groups(model, trainable: list, lr: float, lr_base: float, wd: float) -> list[dict]:
+    """Grupos do AdamW: novas camadas (lr, wd) e base (lr_base efetiva, wd 0). Sem base treinável: um grupo só (como o v5)."""
+    k = getattr(model, "_n_new_trainable", len(trainable))
+    g = [{"params": trainable[:k], "lr": lr, "weight_decay": wd, "name": "new"}]
+    if len(trainable) > k:
+        g.append({"params": trainable[k:], "lr": lr_base, "weight_decay": 0.0, "name": "base"})
+    return g
 
 
 def count_params(model) -> dict:
@@ -638,13 +680,17 @@ def main():
     hp = StageFHParams.from_config(cfg_f, run_id=a.run_id, num_workers=workers, batch_size=bl)
     clip = a.grad_clip if a.grad_clip is not None else hp.grad_clip
     model, acfg, sites, base_kind, train_cond, init_desc = build_v5(a, device, hp, paths)
-    trainable = prepare(model, train_cond)
+    trainable = prepare(model, train_cond, a.train_base)
     broadcast_params(trainable, world)
     counts = count_params(model)
     n_tr = sum(p.numel() for p in trainable)
     if is0:
         log(f"base {base_kind} ({init_desc}) | variante {a.variant} | adaptadores {acfg.to_dict()} | sítios {sites} | "
-            f"parâmetros {json.dumps(counts)} | treináveis {n_tr} ({100 * n_tr / counts['total']:.2f}%)")
+            f"parâmetros {json.dumps(counts)} | treináveis {n_tr} ({100 * n_tr / counts['total']:.2f}%) | "
+            f"base {a.train_base}: {sum(p.numel() for p in trainable[model._n_new_trainable:])} parâmetros"
+            + (f", lr_base {a.lr_base:.2e} (efetiva), wd 0" if a.train_base != "frozen" else ""))
+        if a.train_base != "frozen" and not (a.p_drop or 0) > 0:
+            log("AVISO: --train-base sem --p-drop > 0: o caminho sem perfil muda sem nenhuma âncora")
     setup_precision(model, a, amp)
     setup_speed(model, a)
     maybe_compile(model, a)
@@ -665,7 +711,12 @@ def main():
         raise SystemExit("--sync-free/--step-mode não suportam --amp fp16 (GradScaler); use bf16")
     if defer and a.opt_impl != "fused":
         raise SystemExit("--log-every > 1 com --sync-free exige --opt-impl fused (pulo de passo não finito na GPU)")
-    if a.step_mode == "graph" and not (a.p_drop == 0 or (a.profile_drop_mode == "batch" and a.skip_off_batches)):
+    if a.train_base != "frozen" and a.skip_off_batches:
+        raise SystemExit("--skip-off-batches com --train-base: os lotes sem perfil têm gradiente na base")
+    if a.step_mode == "graph" and a.train_base != "frozen" and a.p_drop and a.profile_drop_mode != "batch":
+        raise SystemExit("--step-mode graph com --train-base e --p-drop > 0 exige --profile-drop-mode batch (lotes homogêneos)")
+    if a.step_mode == "graph" and a.train_base == "frozen" and not (
+            a.p_drop == 0 or (a.profile_drop_mode == "batch" and a.skip_off_batches)):
         log("AVISO: --step-mode graph com lotes mistos/sem perfil: esses passos rodam eager (ou um 2º grafo) ao lado do "
             "pool do grafo; com B48 na 3090 não cabe. Use --p-drop 0 (ou --profile-drop-mode batch --skip-off-batches)")
     runner = None
@@ -696,11 +747,14 @@ def main():
                           a.p10_q, a.p10_hinge_db, a.p10_min_frames]
     if a.init_from:  # fine-tune (fora do hash quando ausente: runs existentes mantêm o hash)
         hashed["init_from"] = str(Path(a.init_from).resolve())
+    if a.train_base != "frozen":  # pro-v5-fullft (fora do hash quando congelada: runs existentes mantêm o hash)
+        hashed["train_base"] = [a.train_base, a.lr_base]
     if a.profile_drop_mode != "sample":  # padrão fora do hash: runs existentes mantêm o hash
         hashed["drop_mode"] = a.profile_drop_mode  # o bloco = lote por rank (muda com o nº de GPUs, fora do hash)
     chash = config_hash(hashed)
     okw = {"fused": True} if a.opt_impl == "fused" else ({"foreach": True} if a.opt_impl == "foreach" else {})
-    opt = torch.optim.AdamW(trainable, lr=lr, weight_decay=a.weight_decay, **okw)
+    opt = torch.optim.AdamW(opt_groups(model, trainable, lr, a.lr_base, a.weight_decay), lr=lr,
+                            weight_decay=a.weight_decay, **okw)
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: lr_factor(s, warmup, total_steps))
     log_path = run_dir / "loss-log.jsonl"
     existing = load_latest(ckpt_dir, expected_cfg_hash=chash)
@@ -712,7 +766,7 @@ def main():
         restore_rng(existing)
         step = existing.step
         spent_before = float(existing.extra.get("elapsed_s", 0.0))
-        trainable = prepare(model, train_cond)
+        trainable = prepare(model, train_cond, a.train_base)
         if runner is not None:
             runner.trainable = trainable
         if is0:
@@ -808,7 +862,8 @@ def main():
                     rel_hist[k].append(row[k] / mr)
             if st % 20 == 0 or st <= 3:
                 rel = {f"rel_{k}": float(np.median(v)) for k, v in rel_hist.items()}
-                lf.write(json.dumps({"step": st, "lr": float(sched.get_last_lr()[0]), **row, "grad_norm": gnv,
+                lf.write(json.dumps({"step": st, "lr": float(sched.get_last_lr()[0]), "lr_all": sched.get_last_lr(),
+                                     **row, "grad_norm": gnv,
                                      "dt": gpu_dt, "wait": wt, **rel, "wall": wall}) + "\n")
                 lf.flush()
             if st % 25 == 0 or st <= 3:
