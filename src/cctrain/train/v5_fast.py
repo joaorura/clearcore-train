@@ -328,6 +328,7 @@ class StepRunner:
             kw = {"mode": compile_mode} if compile_mode and compile_mode != "default" else {}
             self._fn = torch.compile(self._loss, dynamic=False, **kw)
         self.graphs: dict = {}
+        self._primed = False
 
     def _loss(self, b: dict) -> dict:
         return self.loss_fn(self.model, self.istft, self.df_params, self.hp, b, self.a, self.amp)
@@ -343,6 +344,12 @@ class StepRunner:
         try:
             for p in self.trainable:
                 p.grad = None
+            if self.mode == "compile" and not self._primed:
+                # caches de constantes (envelope da iSTFT, pesos de bins/formantes, LocalSnrTarget) preenchidos fora do
+                # torch.compile: criados dentro de um CUDA Graph seriam saídas do grafo, sobrescritas no replay seguinte
+                with torch.no_grad():
+                    self._loss(b)
+                self._primed = True
             if self.mode == "compile" and self.compile_mode in ("reduce-overhead", "max-autotune"):
                 torch.compiler.cudagraph_mark_step_begin()
             parts = self._fn(b)
