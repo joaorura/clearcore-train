@@ -49,7 +49,8 @@ echo "[$(date '+%F %T')] job ${SLURM_JOB_ID:-?} | GPUs $NG (${CUDA_VISIBLE_DEVIC
 CMD=("$PY" -m torch.distributed.run --standalone --nproc_per_node "$NG" scripts/train_pro_v5.py
      --run-id "$RUN_ID" --runs-subdir . --workers "$WPR" --ckpt-every-min 10 "$@")
 { echo "${CMD[*]}"; echo "commit $(git rev-parse HEAD) | job ${SLURM_JOB_ID:-?} | GPUs $NG | CPUs $CPUS"
-  echo "dados: mix_v4 fix dry-gain 0145934$(printf '%s ' "$@" | grep -q -- --gpu-mix && echo ' + gpu-mix 56bc2f5')"
+  echo "dados: ${DATA_NOTE:-mix_v4 fix dry-gain 0145934$(printf '%s ' "$@" | grep -q -- --gpu-mix && echo ' + gpu-mix 56bc2f5')}"
+  [ -n "${LAUNCH_NOTE:-}" ] && echo "$LAUNCH_NOTE"
 } >>"$RUN_DIR/launch-cmd.txt"
 
 WP=""
