@@ -183,6 +183,6 @@ def whisper_tilt(x: torch.Tensor) -> torch.Tensor:
     m, n = x.shape
     k = torch.arange(400, dtype=torch.float64, device=x.device)
     h = (1 - a) * torch.pow(torch.tensor(a, dtype=torch.float64, device=x.device), k)
-    L = n + h.numel() - 1
+    L = next_fast_len(n + h.numel() - 1, real=True)  # tamanho liso: plano cuFFT pequeno (288399 pedia workspace enorme)
     y = torch.fft.irfft(torch.fft.rfft(x, L, dim=1) * torch.fft.rfft(h, L)[None], L, dim=1)[:, :n]
     return y * (torch.sqrt(torch.mean(x**2, dim=1, keepdim=True)) / (torch.sqrt(torch.mean(y**2, dim=1, keepdim=True)) + 1e-20))
