@@ -366,9 +366,23 @@ O2 conferido em `runs/oracle-O2/quick-eval.jsonl` (passos 2083 e 4166; ainda sem
 | casamento nativo, K=48 tokens | 0,844 |
 | casamento nativo, K=16 tokens | 0,841 |
 | casamento nativo, todos os quadros do cadastro | 0,850 |
-| casamento + ECAPA | **0,897** (meta 0,90) |
+| casamento nativo + ECAPA deslizante (`nat_k48+ECAPA`), **não implantável** | 0,897 (sonda curta), 0,916 (longa) |
 
-Versão longa da sonda em andamento.
+**Correção (14/11):** a variante `nat_k48+ECAPA` calcula o ECAPA **na mistura**, em janela causal de 1 s a cada 100 ms
+(≈ 0,77 s de CPU por segundo de áudio), portanto **não é implantável em tempo real**. Ela serve só como teto de
+referência (±300 ms 0,923; erro 17%; rajadas ~60 ms). A meta de 0,90 **não** foi atingida de forma implantável.
+
+Melhor variante implantável (só cadastro fixo, atraso 0 ms):
+
+| Variante | AUC | ±300 ms | Erro | Rajadas |
+|---|---|---|---|---|
+| `nat_k48` | 0,878 | 0,89–0,90 | ~21% | ~70 ms |
+| `nat_k16` | 0,880 | 0,89–0,90 | ~21% | ~70 ms |
+| `nat_all` (todos os quadros) | 0,882 | 0,89–0,90 | ~21% | ~70 ms |
+
+**Personal VAD 2.0 (pesos abertos, conformer + FiLM + d-vector, treinado em 98 falantes MLS)** nas nossas dev/usuário:
+AUC 0,678 (E3) e 0,646 (E5), erro 36–40%, rajadas 104–130 ms, custo ~1,8 ms de CPU por segundo de áudio. Não
+generaliza para o nosso cenário (branch `exp/pvad-bench`, commit 0bff252).
 
 ### 9.5 Conclusão
 
@@ -399,7 +413,7 @@ ruidosa o ganho cai muito, porque a troca de turno exige decisão de baixa latê
 7. **Atualização de 14/11 (tarde)**: o item 2.2 acima foi testado na seção 9: liberar GRUs/pesos
    não resolve. Próximo: rodar **O2'** (oráculo com 30 ms de atraso e 5% de erro) para confirmar o requisito de
    latência e, se confirmar, implementar a **proposta A** (`docs/proposta-arquitetura-tse.md`) com requisito de decisão
-   ≤ ~30 ms e precisão nas trocas de turno; terminar a sonda longa de AUC (meta 0,90).
+   ≤ ~30 ms e precisão nas trocas de turno; a sonda longa já terminou: o melhor implantável é ~0,88 (meta 0,90 não atingida; ver §9.4).
 
 ## 11. Ver também (vault Obsidian)
 

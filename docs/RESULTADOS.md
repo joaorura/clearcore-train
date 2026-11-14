@@ -47,4 +47,4 @@ Nenhum modelo treinável passou todos os critérios. Ganhar C6 (picote após o i
 
 Proposta A de [`proposta-arquitetura-tse.md`](proposta-arquitetura-tse.md): cadastro multi-token com casamento por
 quadro antes da GRU, com requisito de decisão ≤ ~30 ms e precisão nas trocas de turno. Antes, o O2' (oráculo com 30 ms
-de atraso e 5% de erro) confirma o requisito. Sonda de AUC da presença: casamento + ECAPA chega a 0,897 (meta 0,90).
+de atraso e 5% de erro) confirma o requisito. Sonda de AUC da presença: o melhor resultado **implantável** (só cadastro fixo, atraso 0 ms) é AUC ~0,88 (erro ~21%); os 0,897/0,916 do casamento + ECAPA usam ECAPA calculado na mistura em janela deslizante e **não são implantáveis em tempo real** (ver `pro-v5-processo.md` §9.4). A meta de 0,90 **não** foi atingida de forma implantável.

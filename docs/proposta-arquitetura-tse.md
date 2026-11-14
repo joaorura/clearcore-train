@@ -216,7 +216,11 @@ Passa = algum snapshot com C8 ≥ 85%, C6 ≥ −3,5 dB, C1 ≥ −1 dB e R0 PAS
 **Sonda T0 (1 GPU, ~30 min por rodada).** Reaproveita `scripts/ceiling_*`: mesmo cache de dev, mesmas cabeças, mais
 variantes com casamento entre as features pré-GRU (convs congeladas) e o banco de quadros do cadastro (K=16 e 48, com
 e sem ECAPA). Bases: 0,807 (trunk) e 0,862 (trunk + ECAPA de 1 s, 38×). Passa = AUC ≥ 0,90 no rótulo padrão **e**
-≥ 50% do só-interferente zerado com ≤ 2% do alvo (hoje 27,8%). Medir também o AUC nos 200 ms após a troca de falante.
+≥ 50% do só-interferente zerado com ≤ 2% do alvo (hoje 27,8%).
+
+> Atualização (14/11): medido, o melhor casamento implantável (só cadastro fixo) dá AUC ~0,88 (erro ~21%); os 0,897/0,916
+> vieram de ECAPA deslizante na mistura (≈ 0,77 s de CPU por s de áudio), não implantável. O Personal VAD 2.0 aberto
+> deu AUC 0,65–0,68 (erro 36–40%). Detalhes em `pro-v5-processo.md` §9.4. Medir também o AUC nos 200 ms após a troca de falante.
 
 Esforço de código: entradas do oráculo no treino e no avaliador, banco de quadros do cadastro e as cabeças novas.
 É apertado para um dia; se faltar tempo, o oráculo tem prioridade.
