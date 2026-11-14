@@ -90,6 +90,8 @@ from cctrain.train.stage_c import _lsnr_target, _to_device, _truncate_log, total
 from cctrain.train.stage_f import HOP, StageFHParams, _gated, bn_state_sha256, prepare_student  # noqa: E402
 from cctrain.data.mix_v4 import N_PROBS, PATTERN_PROBS, StageV4Dataset, V4Params, build_pools  # noqa: E402
 from cctrain.data.workers import init_worker  # noqa: E402
+from cctrain.data.gpu.mixer import GpuMixer  # noqa: E402
+from cctrain.data.gpu.recipe import StageV4RecipeDataset, collate_recipes  # noqa: E402
 
 ensure_df_importable()
 from df.loss import Istft  # noqa: E402
@@ -155,6 +157,9 @@ def parse_args(argv=None):
     p.add_argument("--probe-steps", default="", help="passos com medição de gradiente por termo")
     p.add_argument("--runs-subdir", default="m4")
     p.add_argument("--device", default="cuda")
+    p.add_argument("--gpu-mix", action="store_true",
+                   help="workers só sorteiam a receita e entregam o áudio cru; mistura, rótulos e features na GPU "
+                        "(cctrain.data.gpu, equivalente ao caminho CPU; fora do hash)")
     return p.parse_args(argv)
 
 
@@ -454,9 +459,16 @@ def main():
     ds, pl = make_dataset(paths, vp)
     log(f"pools: {json.dumps(pl.stats)} | v4 {json.dumps(vp.hashable())}")
     sampler = list(range(step * a.batch_size, len(ds)))
+    mixer = None
+    if a.gpu_mix:
+        ds = StageV4RecipeDataset(ds.pools, ds.bank, ds.data_root, vp)
+        mixer = GpuMixer.from_dataset(ds, device)
+        log(f"--gpu-mix: receitas nos workers, mistura/rótulos/features em {device}")
     dl = DataLoader(ds, batch_size=a.batch_size, sampler=sampler, num_workers=a.workers,
                     prefetch_factor=a.prefetch if a.workers else None, persistent_workers=False,
-                    worker_init_fn=init_worker)
+                    worker_init_fn=init_worker, collate_fn=collate_recipes if mixer else None,
+                    pin_memory=bool(mixer) and device.startswith("cuda"))
+    n_refill = 0
 
     t_start = time.monotonic()
     last_ckpt = t_start
@@ -497,6 +509,11 @@ def main():
             except StopIteration:
                 stop_reason = "data_end"
                 break
+            if mixer is not None:  # o tempo da mistura na GPU conta como espera por dados
+                batch = mixer(batch)
+                n_refill += mixer.fill_invalid(batch, ds)
+                batch.pop("valid")
+                batch.pop("index")
             t0 = time.perf_counter()
             waits.append(t0 - tw)
             b = _to_device(batch, device)
@@ -577,7 +594,7 @@ def main():
         "rel_median": {k: float(np.median(v)) for k, v in rel_hist.items()},
         "pss_gb_max": pss_max / GIB, "bn_unchanged": bn_state_sha256(model) == bn_before,
         "vram_peak_gb": torch.cuda.max_memory_allocated(device) / GIB if device.startswith("cuda") else None,
-        "ema": ema, "args": vars(a),
+        "ema": ema, "args": vars(a), "gpu_mix_cpu_refills": n_refill if a.gpu_mix else None,
     }
     (run_dir / "summary.json").write_text(json.dumps(summary, indent=1))
     (run_dir / "TRAIN_DONE").write_text(f"{stop_reason} passo {step} {time.strftime('%F %T')}\n")
