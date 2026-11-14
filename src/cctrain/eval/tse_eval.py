@@ -121,6 +121,10 @@ def build_model(ckpt: Path, arch: str, device: str):
         from cctrain.models.adapters import AdapterConfig, attach_adapters
 
         attach_adapters(m, AdapterConfig.from_dict(ck.extra["adapter"]))
+    if ck.extra.get("lsnr_corr"):  # pro-v5-keep: correção do lsnr pelo perfil
+        from cctrain.models.pdfnet3_pro import attach_lsnr_correction
+
+        attach_lsnr_correction(m, float(ck.extra["lsnr_corr"]))
     m.load_state_dict(ck.model, strict=True)
     return m.eval()
 
@@ -158,6 +162,8 @@ class ProfileFrameModel(rp.TorchFrameModel):
             ferb = ferb + (model.freq_mixer(ferb) - ferb) * m.view(-1, 1, 1, 1)
             e0, e1, e2, e3, emb, c0, lsnr = base.enc(ferb, fspec, film=(self._v.gamma_enc, self._v.beta_enc))
             a = model.cross_attn(emb, emb_spk, mask=m)
+            if getattr(model, "lsnr_corr", None) is not None:  # pro-v5-keep
+                lsnr = lsnr + model.lsnr_corr(a.output) * (model.lsnr_corr_scale * m.reshape(-1, 1, 1))
             self._enc = (e0, e1, e2, e3, c0, a.output, a.subband_gains[0, 0])
             self.lsnr_true = lsnr.reshape(-1).cpu().numpy().astype(np.float32)
             if getattr(model, "presence", None) is not None:

@@ -369,7 +369,7 @@ def set_gate(root: nn.Module, g: Tensor | None, emb: Tensor | None = None) -> No
 # --- congelamento --------------------------------------------------------------------------------------------------
 
 # camadas que o Pro adiciona em cima do DFNet3 (o resto de `base.*` é o DFNet3 publicado)
-COND_PREFIXES = ("film.", "cross_attn.", "freq_mixer.", "presence.")
+COND_PREFIXES = ("film.", "cross_attn.", "freq_mixer.", "presence.", "lsnr_corr.")
 
 
 def param_groups(model: nn.Module) -> dict[str, list[str]]:

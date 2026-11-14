@@ -56,6 +56,7 @@ from train_pro_v4_keep import _floats  # noqa: E402
 from train_pro_v4_presence import V31_CKPT, build_model  # noqa: E402
 from cctrain.dfvendor import ensure_df_importable  # noqa: E402
 import cctrain.losses.fast_v5 as fv5  # noqa: E402
+import cctrain.losses.zero_tgt as zt  # noqa: E402
 from cctrain.losses.dfnet import (  # noqa: E402
     asymmetric_formant_loss,
     df_coef_temporal_regularization_loss,
@@ -88,7 +89,7 @@ from df.model import ModelParams  # noqa: E402
 GIB = 1024**3
 DATA_TAG = "mix_v4 fix dry-gain 0145934"  # o fix não muda o hash do V4Params: fica explícito no hash do run
 GPU_MIX_TAG = "gpu-mix 56bc2f5"  # equivalente ao caminho CPU (fora do hash); registrado no log/extra/summary
-TERMS = ("mr", "os", "leak", "leak_abs", "tail", "ovl", "lsnr", "turn", "n0g", "df_reg")
+TERMS = ("mr", "os", "leak", "leak_abs", "tail", "ovl", "lsnr", "turn", "n0g", "df_reg", "zero_tgt", "p10")
 REF_BATCH = 12
 VARIANTS = {  # base, treina condicionamento, gru_rank, enc_rank
     "P1": ("dfn3", True, 0, 0),
@@ -198,7 +199,25 @@ def parse_args(argv=None):
                         "roda (cctrain.data.gpu.prefetch); lotes idênticos, só esconde a latência")
     p.add_argument("--gpu-mix-wire", choices=("dense", "sparse"), default="dense",
                    help="--gpu-mix: trilhas secas no H2D; sparse manda só os quadros ligados (exato, ~25%% menos bytes)")
+    # pro-v5-keep (desligados por padrão = caminho de antes, bit a bit; ver cctrain.losses.zero_tgt)
+    p.add_argument("--lsnr-corr", type=float, default=0.0,
+                   help="> 0: correção aditiva do lsnr pelo perfil (Linear zerado sobre a saída da cross-attention, "
+                        "escala em dB); o gate ZERO passa a depender de um ramo treinável. Entra no export (EncStep)")
+    p.add_argument("--gate-st-tau", type=float, default=0.0,
+                   help="> 0: gate com straight-through (forward igual; gradiente via σ((lsnr+10)/τ)) nas amostras com perfil")
+    p.add_argument("--zero-tau", type=float, default=2.0, help="τ (dB) do gate suave de L_zero_tgt/L_p10")
+    p.add_argument("--lambda-zero-tgt", type=float, default=0.0,
+                   help="L_zero_tgt: quadros com alvo ativo, P(ZERO) + hinge do ganho efetivo do alvo-sombra")
+    p.add_argument("--zero-tgt-hinge-db", type=float, default=-1.0)
+    p.add_argument("--lambda-p10", type=float, default=0.0, help="hinge no p10 do ganho efetivo do alvo por item")
+    p.add_argument("--p10-q", type=float, default=0.10)
+    p.add_argument("--p10-hinge-db", type=float, default=-3.0)
+    p.add_argument("--p10-min-frames", type=int, default=20)
     return p.parse_args(argv)
+
+
+def keep_on(a) -> bool:
+    return getattr(a, "lambda_zero_tgt", 0.0) > 0 or getattr(a, "lambda_p10", 0.0) > 0 or getattr(a, "gate_st_tau", 0.0) > 0
 
 
 # --- distribuído ----------------------------------------------------------------------------------------------------
@@ -369,8 +388,12 @@ def step_v5(model, istft, df_params, hp: StageFHParams, b: dict, a, amp, timer=N
         else:
             se_c = base.df_op(spec_clean.clone(), df_coefs)
         se_c = torch.cat([se_c[..., : base.nb_df, :], sm_c[..., base.nb_df:, :]], dim=-2)
-        out, zero = gate_v4(spec, spec_m, spec_e, lsnr, profile)
-        shadow = torch.where(zero[:, None, :, None, None], torch.zeros_like(se_c), se_c)
+        if keep_on(a):
+            out, zero, g_st = zt.gate_st(spec, spec_m, spec_e, lsnr, profile, a.gate_st_tau)
+            shadow = se_c * g_st[:, None, :, None, None]
+        else:
+            out, zero = gate_v4(spec, spec_m, spec_e, lsnr, profile)
+            shadow = torch.where(zero[:, None, :, None, None], torch.zeros_like(se_c), se_c)
     with tm("istft"):
         est = istft(out)
         with torch.no_grad():
@@ -426,6 +449,19 @@ def step_v5(model, istft, df_params, hp: StageFHParams, b: dict, a, amp, timer=N
     parts = {"mr": mr, "os": os_, "leak": a.lambda_leak * leak, "ovl": a.lambda_ovl * ovl, "lsnr": ls,
              "turn": a.lambda_turn * turn, "n0g": a.lambda_n0g * n0g, "tail": a.lambda_tail * tail,
              "leak_abs": a.lambda_leak_absent * leak_abs, "df_reg": l_df}
+    kst = {}
+    if keep_on(a):
+        with tm("zero_tgt+p10"):
+            p_pass = zt.pass_prob(lsnr, a.zero_tau)
+            f_t = f_keep & b["has_target"][:, None]
+            g_eff = zt.effective_gain_db(zt.frame_energy(se_c), p_cl.sum(-1), p_pass)
+            lz, zst = zt.zero_target_loss(g_eff, p_pass, f_t, a.zero_tgt_hinge_db)
+            lq, qst = zt.p10_loss(g_eff, f_t, a.p10_q, a.p10_hinge_db, a.p10_min_frames)
+        if a.lambda_zero_tgt > 0:
+            parts["zero_tgt"] = a.lambda_zero_tgt * lz
+        if a.lambda_p10 > 0:
+            parts["p10"] = a.lambda_p10 * lq
+        kst = {"raw_zero_tgt": lz.detach(), "raw_p10": lq.detach(), **zst, **qst}
     total = sum(parts.values())
     with torch.no_grad():
         oi = f_leak.bool()
@@ -433,7 +469,7 @@ def step_v5(model, istft, df_params, hp: StageFHParams, b: dict, a, amp, timer=N
                  "raw_tail": tail.detach(), "g_turn_db": tst["g_turn_db"], "g_turn_early_db": tst["g_turn_early_db"],
                  "g_n0_db": n0st["g_turn_db"],
                  "zero_frac_only_interf": (zero & oi).sum() / oi.sum().clamp(min=1),
-                 "zero_frac_target": (zero & f_keep).sum() / f_keep.sum().clamp(min=1)}
+                 "zero_frac_target": (zero & f_keep).sum() / f_keep.sum().clamp(min=1), **kst}
     return {"total": total, **parts, **stats}
 
 
@@ -468,6 +504,10 @@ def build_v5(a, device: str, hp: StageFHParams, paths: Paths):
     sites = attach_adapters(model, cfg) if cfg.any else {}
     if not cfg.any:  # sem adaptadores: ainda marca o modelo para o eval reconhecer a config
         model.adapter_cfg = cfg
+    if getattr(a, "lsnr_corr", 0.0) > 0:  # pro-v5-keep
+        from cctrain.models.pdfnet3_pro import attach_lsnr_correction
+
+        attach_lsnr_correction(model, a.lsnr_corr)
     model.to(device)
     return model, cfg, sites, base, train_cond, init_desc
 
@@ -612,6 +652,8 @@ def main():
         torch.backends.cudnn.benchmark = True
     if a.channels_last:
         model.to(memory_format=torch.channels_last)
+    if keep_on(a) and a.loss_impl != "fast":
+        raise SystemExit("--lambda-zero-tgt/--lambda-p10/--gate-st-tau só existem em --loss-impl fast")
     if fast and amp == torch.float16:
         raise SystemExit("--sync-free/--step-mode não suportam --amp fp16 (GradScaler); use bf16")
     if defer and a.opt_impl != "fused":
@@ -642,6 +684,9 @@ def main():
               "lambdas": [a.lambda_leak, a.lambda_ovl, a.lambda_turn, a.lsnr_factor, a.lambda_n0g, a.n0g_hinge_db,
                           a.lambda_tail, a.tail_s, a.lambda_leak_absent],
               "turn": [a.turn_hinge_db, a.turn_boost, a.turn_decay_s], "fw": a.formant_weight, "v5": 1, "data": DATA_TAG}
+    if a.lsnr_corr > 0 or keep_on(a):  # pro-v5-keep (fora do hash quando desligado: runs existentes mantêm o hash)
+        hashed["keep"] = [a.lsnr_corr, a.gate_st_tau, a.zero_tau, a.lambda_zero_tgt, a.zero_tgt_hinge_db, a.lambda_p10,
+                          a.p10_q, a.p10_hinge_db, a.p10_min_frames]
     if a.profile_drop_mode != "sample":  # padrão fora do hash: runs existentes mantêm o hash
         hashed["drop_mode"] = a.profile_drop_mode  # o bloco = lote por rank (muda com o nº de GPUs, fora do hash)
     chash = config_hash(hashed)
@@ -706,7 +751,7 @@ def main():
                               keep=keep, sampler_state={"step": step}, cfg_hash=chash, commit=commit,
                               extra={"elapsed_s": elapsed(), "reason": reason, "args": vars(a), "v4": vp.hashable(),
                                      "presence_head": False, "adapter": acfg.to_dict(), "data": data_tag, "base": base_kind,
-                                     "init": init_desc, "train_cond": train_cond, "world": world,
+                                     "init": init_desc, "train_cond": train_cond, "world": world, "lsnr_corr": a.lsnr_corr,
                                      "gating": {"mode": "lsnr-profile", "zero_below_db": -10.0},
                                      "wall": time.strftime("%Y-%m-%d %H:%M:%S")})
         log(f"checkpoint {pth} ({reason})")
@@ -750,7 +795,8 @@ def main():
                 continue
             mr = max(row["mr"], 1e-9)
             for k in TERMS[1:]:
-                rel_hist[k].append(row[k] / mr)
+                if k in row:
+                    rel_hist[k].append(row[k] / mr)
             if st % 20 == 0 or st <= 3:
                 rel = {f"rel_{k}": float(np.median(v)) for k, v in rel_hist.items()}
                 lf.write(json.dumps({"step": st, "lr": float(sched.get_last_lr()[0]), **row, "grad_norm": gnv,
@@ -765,7 +811,9 @@ def main():
                     f"espera={wtm:.3f} amostras/s={a.global_batch / max(sps + wtm, 1e-9):.1f} "
                     f"lr={sched.get_last_lr()[0]:.2e} gTurn={row['g_turn_db']:+.1f} "
                     f"gTurn0.5={row['g_turn_early_db']:+.1f} gN0={row['g_n0_db']:+.1f} "
-                    f"zeroOI={row['zero_frac_only_interf']:.2f} zeroT={row['zero_frac_target']:.3f} gn={gnv:.2f} "
+                    f"zeroOI={row['zero_frac_only_interf']:.2f} zeroT={row['zero_frac_target']:.3f} "
+                    + (f"pZT={row['zero_tgt_p']:.3f} gP10={row['g_p10_db']:+.1f} " if 'zero_tgt_p' in row else "")
+                    + f"gn={gnv:.2f} "
                     f"vram={mem:.1f}GiB ETA={eta_h:.1f}h")
         pend.clear()
         pend_wait.clear()
@@ -902,7 +950,8 @@ def main():
             row = {k: float(v.detach()) for k, v in parts.items()}
             mr = max(row["mr"], 1e-9)
             for k in TERMS[1:]:
-                rel_hist[k].append(row[k] / mr)
+                if k in row:
+                    rel_hist[k].append(row[k] / mr)
             if step % 20 == 0 or step <= 3:
                 rel = {f"rel_{k}": float(np.median(v)) for k, v in rel_hist.items()}
                 lf.write(json.dumps({"step": step, "lr": float(sched.get_last_lr()[0]), **row, "grad_norm": float(gn),

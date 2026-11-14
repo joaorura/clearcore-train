@@ -122,6 +122,7 @@ class EncStep(nn.Module):
         super().__init__()
         enc = pro.base.enc
         self.enc, self.film, self.mixer, self.ca = enc, pro.film, pro.freq_mixer, pro.cross_attn
+        self.lsnr_corr, self.lsnr_corr_scale = getattr(pro, "lsnr_corr", None), getattr(pro, "lsnr_corr_scale", 10.0)
         self.erb_conv0, self.erb_fpad = _strip_time_pad(enc.erb_conv0, 2)
         self.df_conv0, self.df_fpad = _strip_time_pad(enc.df_conv0, 2)
         for m in (enc.erb_conv1, enc.erb_conv2, enc.erb_conv3, enc.df_conv1, self.mixer):
@@ -147,6 +148,8 @@ class EncStep(nn.Module):
         emb, h = _gru_film(enc.emb_gru, emb, enc_h_in, (v.gamma_enc, v.beta_enc))
         lsnr = enc.lsnr_fc(emb) * enc.lsnr_scale + enc.lsnr_offset
         att = self.ca(emb, speaker_embedding, mask=speaker_present.reshape(1, 1))
+        if self.lsnr_corr is not None:  # pro-v5-keep: mesma correção do PDFNet3Pro.forward
+            lsnr = lsnr + self.lsnr_corr(att.output) * (self.lsnr_corr_scale * speaker_present.reshape(1, 1, 1))
         return (e0, e1, e2, e3, att.output, c0, lsnr, att.subband_gains, h,
                 erb_win[:, :, 1:], spec_win[:, :, 1:])
 

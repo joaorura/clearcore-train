@@ -121,6 +121,10 @@ class PDFNet3Pro(PDFNet3):
             if presence_head else None
         # treino: escala do gradiente que volta da cabeça de presença para o tronco (o forward não muda)
         self.presence_trunk_grad_scale = 1.0
+        # pro-v5-keep: correção aditiva do lsnr a partir da saída da cross-attention (perfil), zero-init; None = sem
+        # correção (state_dict igual ao de antes). Ver `attach_lsnr_correction`.
+        self.lsnr_corr = None
+        self.lsnr_corr_scale = 10.0
 
     def forward(
         self,
@@ -199,6 +203,8 @@ class PDFNet3Pro(PDFNet3):
         ca_input = speaker_tokens if speaker_tokens is not None else embedding
         attn_out = self.cross_attn(emb, ca_input, mask=mask)
         emb_conditioned = attn_out.output
+        if self.lsnr_corr is not None:  # só com perfil (mask = 0 soma 0: sem perfil o lsnr é o da base, bit a bit)
+            lsnr = lsnr + self.lsnr_corr(emb_conditioned) * (self.lsnr_corr_scale * mask.reshape(-1, 1, 1))
         p_logit = None
         if return_presence:
             if self.presence is None:
@@ -281,3 +287,17 @@ class PDFNet3Pro(PDFNet3):
             "film_df": self.base.df_dec.df_gru.linear_in,
             "cross_attn": self.cross_attn,
         }
+
+
+def attach_lsnr_correction(model: PDFNet3Pro, scale: float = 10.0) -> nn.Linear:
+    """pro-v5-keep: lsnr' = lsnr_base + scale · Linear(saída da cross-attention) · mask, com o Linear zerado (no passo 0
+    o lsnr é o da base). O gating por lsnr (ZERO < −10 dB) passa a depender de um ramo treinável que vê o perfil; a
+    cabeça `lsnr_fc` do DFNet3 continua congelada. O export (`EncStep`) aplica a mesma soma."""
+    dev = next(model.parameters()).device
+    head = nn.Linear(model.cross_attn.cfg.query_dim, 1).to(dev)
+    nn.init.zeros_(head.weight)
+    nn.init.zeros_(head.bias)
+    model.lsnr_corr = head
+    model.lsnr_corr_scale = float(scale)
+    return head
+
