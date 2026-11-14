@@ -1,7 +1,8 @@
 # pDFNet3 Pro v4 → v5: processo de treino, diagnósticos e estado
 
-Documento de processo (não é plano). Estado de referência: **14/11/2026, ~13:20** (rig). Os jobs 141, 144 e 145 ainda
-estavam rodando; números marcados "parcial" mudam. Base do documento: branch `train/pro-v5-keep` @ `aa1480d`.
+Documento de processo (não é plano). Estado de referência: **14/11/2026, ~13:20** (rig), com a **atualização da tarde
+de 14/11 na seção 9** (fine-tuning completo a partir do DFNet3, resultados finais de 141/144/145, oráculo de presença e
+sonda de AUC). Linhas marcadas "parcial" na tabela da seção 3 foram fechadas na seção 9. Base do documento: branch `train/pro-v5-keep` @ `aa1480d`.
 Quando uma afirmação é inferência e não medição, está rotulada como tal.
 
 ## 1. Resumo
@@ -16,7 +17,11 @@ Quando uma afirmação é inferência e não medição, está rotulada como tal.
   DFNet3. A correção do gate ZERO (`d40e517`) levou a 7/9 PASS com C6 ≈ −3,5 dB, mas o C8 (isolamento) estaciona em
   ~60–73% e, ao passar de ~70%, alvo e ruído pioram em todas as receitas.
 - **Estado**: nenhum candidato P3 passa todos os critérios; o 141 tem checkpoint intermediário bom (≈300k amostras).
-  Decisão pendente entre aceitar intermediário, iniciar do v3.1 ou liberar GRUs (seção 9).
+  Decisão pendente entre aceitar intermediário, iniciar do v3.1 ou liberar GRUs (seção 10).
+- **Atualização (14/11, tarde, seção 9)**: liberar os pesos da base (fine-tuning completo a partir do DFNet3) segue a
+  mesma curva de troca. Com **presença do alvo perfeita** (oráculo) a arquitetura atual passa 9/9 com 100% de corte,
+  até com a base congelada: o teto é de **discriminação de quem fala**, não de capacidade. Próximo passo: proposta A
+  (`docs/proposta-arquitetura-tse.md`) com latência de decisão ≤ ~30 ms.
 
 ## 2. Métricas e critérios
 
@@ -99,6 +104,14 @@ Colunas: PASS no avaliador rápido (9 critérios) salvo nota; C1/C6 em dB; C8 em
 | job 144 `pro-v5-p3-zpen-cut` @200k (parcial) | 141 + corte forte desde o início: `leak 4, tail 7,5, leak_absent 4`, lote 48 (1 GPU, retomado em 2) | 7/9 | +0,49 | −3,2 | 62 | P | liderava no ponto de 200k |
 | job 144 @300k (parcial) | idem | 3/9 | −1,33 (F) | −5,6 | 71 | F (+4,1/44) | C7 +0,009 (F); C8 sobe e o resto cai |
 | job 145 `pro-v5-p3-zpen-ft` (parcial) | 141 continuado (`--init-from` ckpt 6827 = 655k amostras) com corte forte, `aa1480d`, 500k amostras | 4/9 @100k | +0,14 | −5,4 | 74 | F (+4,1/45), pior | não destravou o teto do C8 |
+| job 141 final | idem | 4/9 | — | — | 73 | — | fechado; mesma troca |
+| job 144 @600k (encerrado em ~660k) | idem | 2/9 | — | — | 73 | — | C8 sobe, resto cai |
+| job 145 final | idem | 3/9 | −1,44 | — | 80 | F (+2,7) | maior C8 do P3, alvo pior |
+| job 148 `pro-v5-fullft` all (`647da91`) | fine-tuning completo do DFNet3, `--train-base all --lr-base 1e-5`, p-drop 0,15 por lote | 7/9 @200k → 3/9 @700k | −5,2 → −8,8 | −2,9 (PASS) → −5,9 | 43 → 75 | P @200k | liberar pesos não resolve |
+| job 149 `pro-v5-fullft` gru (`647da91`) | idem, `--train-base gru` | 6/9 @100k → 3/9 @700k | −1,8 → −6,7 | −4,6 → −6,3 | 26 → 76 | P @100k | mesma curva de troca |
+| O1 oráculo limpo (`exp/oracle-ceiling`) | presença verdadeira como entrada, trunk congelado | **9/9 @100k e @200k**; 8/9 @300k | +7,2 | −2,9 / −2,7 | **100** | P | teto é discriminação, não capacidade |
+| O3 oráculo + GRUs liberadas | idem, GRUs treináveis | **9/9 @100k** | +13,2 | −2,6 | **100** | P | encerrado para liberar GPU |
+| O2 oráculo atrasado/ruidoso | 150 ms de atraso + 10% de erro em rajadas | 4/9 @100k e @200k | +3,6 / +3,7 | −6,6 / −5,5 | 78 / 86 | F | latência derruba o ganho |
 
 Notas sobre a tabela:
 
@@ -265,7 +278,7 @@ Pontos de atenção:
 
 ### 8.1 Lançar
 
-Acesso, limites e dados: ver `padroes/uso-da-rig-de-gpu-slurm.md` (vault, seção 10 deste documento) e `COMO-USAR.md` na rig. GPU só dentro de job;
+Acesso, limites e dados: ver `padroes/uso-da-rig-de-gpu-slurm.md` (vault, seção 11 deste documento) e `COMO-USAR.md` na rig. GPU só dentro de job;
 dados e runs em `/mnt/4tb-nvme/work/$USER`, nunca em `~`.
 
 ```bash
@@ -302,7 +315,70 @@ lote, para o torchrun receber **um** TERM). Nunca enviar dois TERM. `--stop-at H
 - O eval completo só roda se `TRAIN_DONE` começa com `total_steps`; parada por sinal/tempo não dispara.
 - O eval completo do job 136 estava em andamento (sem `report.md`) ao fechar este documento.
 
-## 9. Pendências e próximos passos
+## 9. Resultados de 14/11 (tarde)
+
+Todos os números no avaliador rápido (9 critérios). C1/C6 em dB, C8 em %, R0 como ΔSI-SDR/atenuação no silêncio.
+
+### 9.1 Fine-tuning completo a partir do DFNet3 (jobs 148 e 149)
+
+Branch `train/pro-v5-fullft` @ `647da91`, com todas as correções anteriores (gate ZERO, mix sem g²) e as flags novas
+`--train-base all|gru` (libera a base inteira ou só as GRUs), `--lr-base 1e-5`, `p-drop 0,15` sorteado por lote (para
+que a base também veja lotes sem perfil) e pool do CUDA Graph compartilhado.
+
+| Amostras | 148 (`all`) | 149 (`gru`) |
+|---|---|---|
+| 100k | 3/9 (C1 −7,9, C6 −6,2, C8 28) | 6/9 (C1 −1,8, C6 −4,6, C8 26, R0 +7,3) |
+| 200k | **7/9** (C6 −2,9 PASS pela 1ª vez, C7 +0,061, R0 +7,7, C8 43, C1 −5,2) | 5/9 (C8 47) |
+| 300k | 6/9 (C8 58) | 4/9 (C8 63, C6 −6,3) |
+| 400k | 5/9 (C8 71, C1 −7,4) | 2/9 (C1 −5,5, C8 71) |
+| 500k | 4/9 | 4/9 |
+| 600k | 5/9 (C1 −8,5, C8 74) | 4/9 (C8 73) |
+| 700k | 3/9 (C1 −8,8, C6 −5,9, C8 75) | 3/9 (C1 −6,7, C8 76) |
+
+Encerrados em ~700k. **Conclusão**: a mesma curva de troca do P3 (C8 sobe, C1/C6 caem); liberar os pesos da base não
+resolve. O C6 passou pela primeira vez (148 @200k), mas com C1 −5,2 e C8 43%.
+
+### 9.2 Fechamento dos jobs P3
+
+- **Job 141**: final 4/9 (C8 73).
+- **Job 144**: encerrado em ~660k; @600k 2/9, C8 73.
+- **Job 145** (`--init-from` 141, corte forte): final 3/9, C8 80, C1 −1,44, R0 +2,7 (F).
+
+### 9.3 Oráculo de presença (branch `exp/oracle-ceiling`, `054dd03`, `bf5d21e`)
+
+Pergunta: o teto é de capacidade da arquitetura ou de saber **quem** está falando? Entrada extra com a atividade
+verdadeira `[alvo, interf, alvo·interf]` (zero-init, × máscara de perfil), injetada antes da GRU do encoder, como FiLM
+nos decoders e somada ao lsnr do gate.
+
+| Run | Configuração | 100k | 200k | 300k |
+|---|---|---|---|---|
+| O1 | oráculo limpo, trunk congelado | **9/9** (C1 +7,2, C6 −2,9, C8 100, R0 P) | **9/9** (C6 −2,7, R0 +7,7) | 8/9 (C7 +0,029 F) |
+| O3 | oráculo limpo, GRUs liberadas | **9/9** (C1 +13,2, C6 −2,6, C8 100) | encerrado para liberar GPU | — |
+| O2 | oráculo com 150 ms de atraso + 10% de erro em rajadas | 4/9 (C1 +3,6, C6 −6,6, C8 78, R0 atenuação no silêncio 18 dB) | 4/9 (C1 +3,7, C6 −5,5, C7 −0,014, C8 86, R0 +6,3/25) | — |
+
+O2 conferido em `runs/oracle-O2/quick-eval.jsonl` (passos 2083 e 4166; ainda sem avaliação de 300k).
+
+### 9.4 Sonda de AUC (presença do alvo por quadro)
+
+| Representação | AUC |
+|---|---|
+| pré-GRU + ECAPA, sem casamento | 0,744 |
+| casamento nativo, K=48 tokens | 0,844 |
+| casamento nativo, K=16 tokens | 0,841 |
+| casamento nativo, todos os quadros do cadastro | 0,850 |
+| casamento + ECAPA | **0,897** (meta 0,90) |
+
+Versão longa da sonda em andamento.
+
+### 9.5 Conclusão
+
+O teto de ~70–80% de corte com perda do alvo é de **discriminação de quem fala**, não de capacidade: com presença
+perfeita a arquitetura atual, até com a base congelada, passa 9/9 com 100% de corte. Com presença atrasada (150 ms) e
+ruidosa o ganho cai muito, porque a troca de turno exige decisão de baixa latência. Próximo passo: **proposta A**
+(`docs/proposta-arquitetura-tse.md`) com requisito de latência ≤ ~30 ms e precisão nas trocas; antes, **O2'** (30 ms,
+5% de erro) para confirmar o requisito.
+
+## 10. Pendências e próximos passos
 
 1. **Resultado final dos jobs 144 e 145** (parciais aqui): 144 em 6775/20834 passos, 145 em 2175/5209, 141 a ~10100/10417.
    Conferir o `best.json` de cada um com o eval completo. O melhor candidato hoje é o checkpoint de ~300k amostras do 141
@@ -320,10 +396,14 @@ lote, para o torchrun receber **um** TERM). Nunca enviar dois TERM. `--stop-at H
    passar o gate de paridade (≥ 60 dB fp32, inclusive sem perfil), e fazer o runtime ler o gating `lsnr-profile` do
    manifesto (hoje só `min_db_thresh` fixo em `dsp_pipeline.rs`, segundo `docs/plan-pro-v4.md` §13).
 6. Anotar o resultado final (checkpoint escolhido, números do eval completo) neste documento e no vault.
+7. **Atualização de 14/11 (tarde)**: o item 2.2 acima foi testado na seção 9: liberar GRUs/pesos
+   não resolve. Próximo: rodar **O2'** (oráculo com 30 ms de atraso e 5% de erro) para confirmar o requisito de
+   latência e, se confirmar, implementar a **proposta A** (`docs/proposta-arquitetura-tse.md`) com requisito de decisão
+   ≤ ~30 ms e precisão nas trocas de turno; terminar a sonda longa de AUC (meta 0,90).
 
-## 10. Ver também (vault Obsidian)
+## 11. Ver também (vault Obsidian)
 
-Notas em `/home/joaorura/Documentos/Obsidian Vault/`:
+Notas no vault Obsidian pessoal (fora deste repositório):
 
 - `projetos/clearcore-train.md` (hub)
 - `decisoes/2026-11-13-metricas-de-qualidade-picote-e-criterios.md`
