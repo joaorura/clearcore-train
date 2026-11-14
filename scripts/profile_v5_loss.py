@@ -12,13 +12,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import statistics
 import sys
 from collections import defaultdict
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
-import torch
+os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+import torch  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import train_pro_v5 as tp  # noqa: E402
@@ -192,36 +194,45 @@ def main():
                 p_.normal_(0, 1e-3)
 
     report = {"parity": [], "step_ms": {}, "fwd_ms": {}, "bwd_ms": {}}
-    # --- paridade (mesmo forward) -------------------------------------------------------------------------------------
-    for bi, b in enumerate(batches):
-        fwd = tp._forward_v5(model, b, amp)
-        fz = Frozen(model, fwd[:4])
-        pr = tp.step_v5_ref(fz, istft, params, hp, b, a, amp)
-        pf = tp.step_v5(model, istft, params, hp, b, a, amp, _fwd=fwd)
-        row = {"batch": bi}
-        for k in ("total",) + LOSS_KEYS + ("g_turn_db", "g_turn_early_db", "g_n0_db", "zero_frac_only_interf",
-                                           "zero_frac_target"):
-            x, y = pf[k].detach().double(), pr[k].detach().double()
-            row[k] = 0.0 if (torch.isnan(x) & torch.isnan(y)).all() else float((x - y).abs() / y.abs().clamp_min(1e-30))
-        def grads(parts, k):
-            return torch.autograd.grad(parts[k], trainable, retain_graph=True, allow_unused=True)
+    # --- paridade (mesmo forward; algoritmos determinísticos) --------------------------------------------------------
+    def cmp(g1, g2):
+        n_, d_ = 0.0, 0.0
+        for x, y in zip(g1, g2):
+            if y is None or x is None:
+                continue
+            n_ += float(((x.double() - y.double()) ** 2).sum())
+            d_ += float((y.double() ** 2).sum())
+        return (n_ / d_) ** 0.5 if d_ > 0 else (0.0 if n_ == 0 else float("inf"))
 
-        def cmp(g1, g2):
-            worst, n_, d_ = 0.0, 0.0, 0.0
-            for x, y in zip(g1, g2):
-                if y is None or x is None:
-                    continue
-                worst = max(worst, rel(x, y))
-                n_ += float(((x - y) ** 2).sum())
-                d_ += float((y ** 2).sum())
-            return worst, ((n_ / d_) ** 0.5 if d_ > 0 else (0.0 if n_ == 0 else float("inf")))
-
-        row["grad_max_rel_per_param"], row["grad_rel_l2"] = cmp(grads(pf, "total"), grads(pr, "total"))
-        for k in LOSS_KEYS:
-            row[f"grad_rel_l2_{k}"] = cmp(grads(pf, k), grads(pr, k))[1]
-        report["parity"].append(row)
-        del fwd, fz, pr, pf
-    print("paridade:", json.dumps(report["parity"], indent=0))
+    prev = torch.backends.cudnn.deterministic, torch.backends.cudnn.benchmark
+    torch.backends.cudnn.deterministic, torch.backends.cudnn.benchmark = True, False
+    torch.use_deterministic_algorithms(True, warn_only=True)
+    for p_amp in (False, amp):
+        worst = defaultdict(float)
+        for b in batches:
+            fwd = tp._forward_v5(model, b, p_amp)
+            leaves = list(fwd[:4])
+            pr = tp.step_v5_ref(Frozen(model, fwd[:4]), istft, params, hp, b, a, p_amp)
+            pr2 = tp.step_v5_ref(Frozen(model, fwd[:4]), istft, params, hp, b, a, p_amp)
+            pf = tp.step_v5(model, istft, params, hp, b, a, p_amp, _fwd=fwd)
+            for k in ("total",) + LOSS_KEYS + ("g_turn_db", "g_turn_early_db", "g_n0_db", "zero_frac_only_interf",
+                                               "zero_frac_target"):
+                x, y = pf[k].detach().double(), pr[k].detach().double()
+                d = 0.0 if (torch.isnan(x) & torch.isnan(y)).all() else float((x - y).abs() / y.abs().clamp_min(1e-30))
+                worst[f"val:{k}"] = max(worst[f"val:{k}"], d)
+            for k in ("total",) + LOSS_KEYS:
+                def g(parts, wrt):
+                    return torch.autograd.grad(parts[k], wrt, retain_graph=True, allow_unused=True)
+                for tag, wrt in (("params", trainable), ("outs", leaves)):
+                    gr = g(pr, wrt)
+                    worst[f"grad_{tag}:{k}"] = max(worst[f"grad_{tag}:{k}"], cmp(g(pf, wrt), gr))
+                    worst[f"noise_{tag}:{k}"] = max(worst[f"noise_{tag}:{k}"], cmp(g(pr2, wrt), gr))
+            del fwd, leaves, pr, pr2, pf
+        report["parity"].append({"amp": bool(p_amp), **worst})
+        print(f"paridade amp={p_amp} (máx. sobre {len(batches)} lotes; rel. L2; noise = ref vs ref):",
+              json.dumps(worst, indent=0))
+    torch.use_deterministic_algorithms(False)
+    torch.backends.cudnn.deterministic, torch.backends.cudnn.benchmark = prev
 
     # --- passo inteiro ----------------------------------------------------------------------------------------------
     def full(impl, b, tm):
