@@ -14,7 +14,8 @@
 # último checkpoint com a mesma sequência de dados e o mesmo cosseno (só muda o batch por GPU).
 #   1 GPU agora:          RUN_ID=pro-v5-p3 sbatch -c 8  --gres=gpu:1 scripts/job_v5.sbatch
 #   mais GPUs depois:     scancel <job>; RUN_ID=pro-v5-p3 sbatch -c 24 --gres=gpu:3 scripts/job_v5.sbatch
-#   (o scancel manda TERM: o treino salva e sai; o novo job retoma.)
+#   (o scancel manda TERM: o treino salva e sai; o novo job retoma. Jobs com a versão anterior deste script, como o
+#    99: parar com `scancel -b -s TERM <job>`, só o shell do lote, para o torchrun receber um único TERM.)
 # CPUs: EVAL_THREADS (2) para o avaliador; o resto dividido entre os ranks (1 processo de treino + workers de dados).
 # Com --gpu-mix (mistura/rótulos/features na GPU) ~4 CPUs por GPU bastam: ex. -c 14 --gres=gpu:3.
 set -euo pipefail
@@ -69,7 +70,9 @@ TP=""
 forward() {
   got_term=1
   echo "[$(date '+%F %T')] sinal recebido: TERM -> treino $TP (salva e sai)"
-  [ -n "$TP" ] && kill -TERM "$TP" 2>/dev/null || true
+  # TERM direto nos ranks (filhos do torchrun), não no torchrun: um 2º TERM no torchrun (scancel já manda um) o faz
+  # abortar o close e matar os ranks antes de salvarem (aconteceu no job 97). Os ranks salvam e saem; o torchrun termina.
+  [ -n "$TP" ] && { pkill -TERM -P "$TP" 2>/dev/null || kill -TERM "$TP" 2>/dev/null || true; }
 }
 trap forward TERM INT
 rc=0
