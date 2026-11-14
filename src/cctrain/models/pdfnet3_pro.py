@@ -65,6 +65,35 @@ class FrequencyDWConvMixer(nn.Module):
         x = self.pw_conv(x)
         return x + res
 
+
+class PresenceHead(nn.Module):
+    """Presença do falante-alvo por quadro (pro-v4-presence, `docs/export-contract-pro-v4.md`).
+
+    Lê a representação DEPOIS da cross-attention (`emb_conditioned` [B,T,512], a mesma que vai aos decoders) e o
+    embedding do perfil: z = relu(W_in·x) e s = W_s·e; a GRU leve integra [z, z⊙s] no tempo (evidência de identidade
+    acumulada) e `out` dá o logit. A interação multiplicativa z⊙s dá à cabeça um termo de "casamento" direto com o
+    perfil, além do que já chega pelo FiLM e pela atenção. Estado `h` [1,B,hidden] (par `p_h` no grafo enc).
+    """
+
+    def __init__(self, in_dim: int = 512, emb_dim: int = 192, proj_dim: int = 64, hidden: int = 32,
+                 init_p: float = 0.9):
+        super().__init__()
+        self.hidden = hidden
+        self.inp = nn.Linear(in_dim, proj_dim)
+        self.spk = nn.Linear(emb_dim, proj_dim)
+        self.gru = nn.GRU(2 * proj_dim, hidden, batch_first=True)
+        self.out = nn.Linear(hidden, 1)
+        # começa "presente" em todo quadro: o gating parte de ERB+DF (o v3.1 sem ZERO) e a BCE puxa para baixo
+        nn.init.constant_(self.out.bias, math.log(init_p / (1.0 - init_p)))
+
+    def forward(self, x: Tensor, embedding: Tensor, h: Tensor | None = None) -> tuple[Tensor, Tensor]:
+        """x [B,T,in_dim], embedding [B,emb_dim] -> (logit [B,T], h [1,B,hidden])."""
+        z = torch.relu(self.inp(x))
+        s = self.spk(embedding).unsqueeze(1)
+        y, h = self.gru(torch.cat([z, z * s], dim=-1), h)
+        return self.out(y).squeeze(-1), h
+
+
 class PDFNet3Pro(PDFNet3):
 
     """Modelo pDFNet3 Pro com Dual-Conditioning: FiLM Macro + Cross-Attention Fina em Sub-bandas."""
@@ -76,6 +105,7 @@ class PDFNet3Pro(PDFNet3):
         cross_attention: CausalSubbandCrossAttention | None = None,
         cross_attention_config: SubbandCrossAttentionConfig | None = None,
         enable_cross_attention: bool = True,
+        presence_head: bool = False,
     ):
         super().__init__(base, generator)
         if cross_attention is not None:
@@ -86,6 +116,15 @@ class PDFNet3Pro(PDFNet3):
         self.enable_cross_attention = enable_cross_attention
         zero_init = self.cross_attn.cfg.zero_init
         self.freq_mixer = FrequencyDWConvMixer(in_channels=1, kernel_size=9, zero_init=zero_init)
+        # pro-v4-presence: cabeça de presença do alvo sobre a saída da cross-attention (None = v3/v3.1, strict igual)
+        self.presence = PresenceHead(self.cross_attn.cfg.query_dim, self.cross_attn.cfg.embedding_dim) \
+            if presence_head else None
+        # treino: escala do gradiente que volta da cabeça de presença para o tronco (o forward não muda)
+        self.presence_trunk_grad_scale = 1.0
+        # pro-v5-keep: correção aditiva do lsnr a partir da saída da cross-attention (perfil), zero-init; None = sem
+        # correção (state_dict igual ao de antes). Ver `attach_lsnr_correction`.
+        self.lsnr_corr = None
+        self.lsnr_corr_scale = 10.0
 
     def forward(
         self,
@@ -97,6 +136,7 @@ class PDFNet3Pro(PDFNet3):
         cross_attention: bool | None = None,
         return_attention_details: bool = False,
         speaker_tokens: Tensor | None = None,
+        return_presence: bool = False,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor] | tuple[tuple[Tensor, Tensor, Tensor, Tensor], SubbandAttentionOutput]:
         """Forward do pDFNet3Pro com suporte a Dual-Conditioning e fallback gracioso.
 
@@ -109,6 +149,8 @@ class PDFNet3Pro(PDFNet3):
             cross_attention: Override explícito para ligar/desligar cross-attention (None usa flag padrão)
             return_attention_details: Se True, retorna também o objeto SubbandAttentionOutput
             speaker_tokens: Opcional. Dicionário de memória do falante multi-token [B, K, token_dim].
+            return_presence: Se True (exige `presence_head`), anexa o logit de presença do alvo [B, T] ao resultado:
+                (spec_e, m, lsnr, df_coefs, p_logit).
 
         Returns:
             (spec_e, m, lsnr, df_coefs) ou ((spec_e, m, lsnr, df_coefs), attn_details)
@@ -161,6 +203,17 @@ class PDFNet3Pro(PDFNet3):
         ca_input = speaker_tokens if speaker_tokens is not None else embedding
         attn_out = self.cross_attn(emb, ca_input, mask=mask)
         emb_conditioned = attn_out.output
+        if self.lsnr_corr is not None:  # só com perfil (mask = 0 soma 0: sem perfil o lsnr é o da base, bit a bit)
+            lsnr = lsnr + self.lsnr_corr(emb_conditioned) * (self.lsnr_corr_scale * mask.reshape(-1, 1, 1))
+        p_logit = None
+        if return_presence:
+            if self.presence is None:
+                raise ValueError("return_presence exige presence_head=True")
+            x_p = emb_conditioned
+            k = self.presence_trunk_grad_scale
+            if k != 1.0 and torch.is_grad_enabled():
+                x_p = x_p * k + x_p.detach() * (1.0 - k)
+            p_logit, _ = self.presence(x_p, embedding)
 
         # LSNR Dropout (se habilitado no modelo base)
         if getattr(self.base, "lsnr_droput", False):
@@ -221,6 +274,8 @@ class PDFNet3Pro(PDFNet3):
             spec_e = spec_e * pf.unsqueeze(-1)
 
         result = (spec_e, m, lsnr, df_coefs)
+        if return_presence:
+            result = result + (p_logit,)
         if return_attention_details:
             return result, attn_out
         return result
@@ -232,3 +287,17 @@ class PDFNet3Pro(PDFNet3):
             "film_df": self.base.df_dec.df_gru.linear_in,
             "cross_attn": self.cross_attn,
         }
+
+
+def attach_lsnr_correction(model: PDFNet3Pro, scale: float = 10.0) -> nn.Linear:
+    """pro-v5-keep: lsnr' = lsnr_base + scale · Linear(saída da cross-attention) · mask, com o Linear zerado (no passo 0
+    o lsnr é o da base). O gating por lsnr (ZERO < −10 dB) passa a depender de um ramo treinável que vê o perfil; a
+    cabeça `lsnr_fc` do DFNet3 continua congelada. O export (`EncStep`) aplica a mesma soma."""
+    dev = next(model.parameters()).device
+    head = nn.Linear(model.cross_attn.cfg.query_dim, 1).to(dev)
+    nn.init.zeros_(head.weight)
+    nn.init.zeros_(head.bias)
+    model.lsnr_corr = head
+    model.lsnr_corr_scale = float(scale)
+    return head
+

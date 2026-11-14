@@ -164,9 +164,18 @@ class ReplicaResult:
     audio: np.ndarray
     lsnr: np.ndarray
     stages: np.ndarray
+    shadow: list[np.ndarray] | None = None  # saída-sombra de cada componente (ver `run_replica(shadow=...)`)
 
 
-def run_replica(audio: np.ndarray, model: FrameModel, thresholds=DEFAULT_THRESHOLDS) -> ReplicaResult:
+def run_replica(audio: np.ndarray, model: FrameModel, thresholds=DEFAULT_THRESHOLDS,
+                frame_gain: np.ndarray | None = None, shadow: Sequence[np.ndarray] | None = None) -> ReplicaResult:
+    """`frame_gain` (opcional): ganho de saída por quadro ANALISADO (índice dos quadros fora do silêncio digital, o
+    mesmo `t` do encoder), aplicado ao espectro de saída do quadro depois do estágio (gating suave, sem estágio novo).
+
+    `shadow` (opcional): componentes da entrada (ex.: alvo, ruído), mesmo comprimento de `audio`. Cada um passa pelas
+    MESMAS decisões do modelo tomadas sobre `audio` (estágio, máscara ERB, coeficientes DF e `frame_gain` de cada quadro,
+    quadros de silêncio digital da mistura), com STFT/síntese próprias. Como, fixadas as decisões, o processamento é
+    linear, a soma das sombras reproduz a saída (a menos de arredondamento): é a vista "o que o modelo fez com o alvo"."""
     from libdf import DF, erb, erb_norm, unit_norm
 
     frames = len(audio) // HOP
@@ -187,6 +196,14 @@ def run_replica(audio: np.ndarray, model: FrameModel, thresholds=DEFAULT_THRESHO
         rx = deque(np.zeros(N_FREQS, np.complex64) for _ in range(max(DF_ORDER, LOOKAHEAD)))
         ry = deque(np.zeros(N_FREQS, np.complex64) for _ in range(DF_ORDER + CONV_LOOKAHEAD))
         enhanced = np.zeros_like(spec)
+        sh = []  # (DF, spec, rx, ry, enhanced) por componente
+        for comp in shadow or ():
+            cf = np.asarray(comp[: frames * HOP], np.float32).reshape(frames, HOP)
+            st_s = DF(48_000, 960, HOP, NB_ERB, 2)
+            sp = st_s.analysis(np.ascontiguousarray(cf[active].reshape(1, -1)))[0]
+            sh.append((st_s, sp, deque(np.zeros(N_FREQS, np.complex64) for _ in range(max(DF_ORDER, LOOKAHEAD))),
+                       deque(np.zeros(N_FREQS, np.complex64) for _ in range(DF_ORDER + CONV_LOOKAHEAD)),
+                       np.zeros_like(sp)))
         for t in range(spec.shape[0]):
             rx.popleft()
             ry.popleft()
@@ -202,12 +219,37 @@ def run_replica(audio: np.ndarray, model: FrameModel, thresholds=DEFAULT_THRESHO
             frame_out = target.copy()
             if coefs is not None:
                 frame_out[:NB_DF] = deep_filter(list(rx), coefs)
+            if frame_gain is not None:
+                frame_out = frame_out * np.float32(frame_gain[t])
             enhanced[t] = frame_out
+            for _st, sp, srx, sry, senh in sh:
+                srx.popleft()
+                sry.popleft()
+                srx.append(sp[t].copy())
+                sry.append(sp[t].copy())
+                tg = sry[DF_ORDER - 1]
+                if gains is not None:
+                    apply_band_gains(tg, gains, widths)
+                fo = tg.copy()
+                if coefs is not None:
+                    fo[:NB_DF] = deep_filter(list(srx), coefs)
+                if frame_gain is not None:
+                    fo = fo * np.float32(frame_gain[t])
+                senh[t] = fo
             lsnr[active[t]] = step.lsnr
             stages[active[t]] = int(stage_of(flags))
         synth = np.asarray(state.synthesis(np.ascontiguousarray(enhanced[None])), np.float32)
         out[active] = synth.reshape(-1, HOP)
-    return ReplicaResult(out.reshape(-1), lsnr, stages)
+    shadow_out = None
+    if shadow is not None:
+        shadow_out = []
+        for k in range(len(shadow)):
+            o = np.zeros((frames, HOP), np.float32)
+            if active.size:
+                st_s, _sp, _rx, _ry, senh = sh[k]
+                o[active] = np.asarray(st_s.synthesis(np.ascontiguousarray(senh[None])), np.float32).reshape(-1, HOP)
+            shadow_out.append(o.reshape(-1))
+    return ReplicaResult(out.reshape(-1), lsnr, stages, shadow_out)
 
 
 def tract_gating(asset: Path, audio: np.ndarray, out_prefix: Path, film: np.ndarray | None = None) -> ReplicaResult:
