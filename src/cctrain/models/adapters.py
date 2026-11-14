@@ -52,13 +52,18 @@ class AdapterConfig:
 
 
 class AdapterGate:
-    """Estado compartilhado (não é Module nem buffer): g [B] float ou None (= desligado) e o embedding [B, E]."""
+    """Estado compartilhado (não é Module nem buffer): g [B] float ou None (= desligado) e o embedding [B, E].
 
-    __slots__ = ("g", "emb")
+    `static` (padrão None = decide pelo conteúdo de g, com sync do host): True = lote homogêneo COM perfil e g ≡ 1,
+    False = lote homogêneo SEM perfil. Quem chama garante a homogeneidade (o host sabe pela receita, sem ler a GPU);
+    sem sync o forward pode ser capturado num CUDA Graph / torch.compile sem quebra de grafo."""
+
+    __slots__ = ("g", "emb", "static")
 
     def __init__(self):
         self.g: Tensor | None = None
         self.emb: Tensor | None = None
+        self.static: bool | None = None
 
 
 class _Adapter(nn.Module):
@@ -70,6 +75,8 @@ class _Adapter(nn.Module):
         g = self._gate.g
         if g is None:
             return None
+        if self._gate.static is not None:
+            return g if self._gate.static else None
         if not bool((g > 0).any()):
             return None
         return g
@@ -175,6 +182,8 @@ class LoRAGRU(_Adapter):
         if g is None:
             return self.orig(x, h)
         emb = self._gate.emb
+        if self._gate.static:  # lote homogêneo com g ≡ 1: um só grupo, sem unique/nonzero (sem sync)
+            return self._run_on(x, h, 1.0, emb)
         b = x.shape[0]
         groups = []  # (índices, valor de g)
         for gv in torch.unique(g[g > 0]).tolist():
