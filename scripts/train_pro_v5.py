@@ -54,6 +54,7 @@ from train_pro_v42 import make_dataset, since_interferer_s, target_shadow, turn_
 from train_pro_v4_keep import _floats  # noqa: E402
 from train_pro_v4_presence import V31_CKPT, build_model  # noqa: E402
 from cctrain.dfvendor import ensure_df_importable  # noqa: E402
+import cctrain.losses.fast_v5 as fv5  # noqa: E402
 from cctrain.losses.dfnet import (  # noqa: E402
     asymmetric_formant_loss,
     df_coef_temporal_regularization_loss,
@@ -151,6 +152,8 @@ def parse_args(argv=None):
     p.add_argument("--device", default="cuda")
     p.add_argument("--gpu-mix", action="store_true",
                    help="workers só sorteiam a receita; mistura, rótulos e features na GPU (cctrain.data.gpu, fora do hash)")
+    p.add_argument("--loss-impl", choices=("fast", "ref"), default="fast",
+                   help="perdas: fast = sem recomputação/sincronização (mesma matemática, fora do hash); ref = a antiga")
     return p.parse_args(argv)
 
 
@@ -197,7 +200,8 @@ def broadcast_params(params: list[torch.nn.Parameter], world: int) -> None:
 # --- passo ----------------------------------------------------------------------------------------------------------
 
 
-def step_v5(model, istft, df_params, hp: StageFHParams, b: dict, a, amp: bool) -> dict:
+def step_v5_ref(model, istft, df_params, hp: StageFHParams, b: dict, a, amp: bool) -> dict:
+    """Implementação de referência das perdas (a de antes do perf/v5-loss; `--loss-impl ref`)."""
     spec, spec_clean, mask = b["spec"], b["spec_clean"], b["mask"]
     nb, T = spec.shape[0], spec.shape[2]
     profile = mask.reshape(nb) > 0
@@ -262,6 +266,120 @@ def step_v5(model, istft, df_params, hp: StageFHParams, b: dict, a, amp: bool) -
         stats = {"raw_leak": leak.detach(), "raw_turn": turn.detach(), "raw_n0g": n0g.detach(),
                  "raw_tail": tail.detach(), "g_turn_db": tst["g_turn_db"].to(spec.device),
                  "g_turn_early_db": tst["g_turn_early_db"].to(spec.device), "g_n0_db": n0st["g_turn_db"].to(spec.device),
+                 "zero_frac_only_interf": (zero & oi).sum() / oi.sum().clamp(min=1),
+                 "zero_frac_target": (zero & f_keep).sum() / f_keep.sum().clamp(min=1)}
+    return {"total": total, **parts, **stats}
+
+
+def _forward_v5(model, b: dict, amp: bool):
+    """Forward + parte espectral em fp32 + gating (comum às duas implementações)."""
+    spec, mask = b["spec"], b["mask"]
+    nb = spec.shape[0]
+    profile = mask.reshape(nb) > 0
+    ctx = torch.autocast("cuda", dtype=torch.bfloat16) if amp else nullcontext()
+    with ctx:
+        spec_e, m, lsnr, df_coefs = model(spec.clone(), b["feat_erb"], b["feat_spec"], b["embedding"], mask)
+    spec_e, m, lsnr, df_coefs = spec_e.float(), m.float(), lsnr.float(), df_coefs.float()
+    return spec_e, m, lsnr, df_coefs, profile
+
+
+_LSNR_T: dict = {}
+
+
+def _lsnr_target_cached(df_params):
+    """O `LocalSnrTarget` de `_lsnr_target` construído uma vez (o construtor relê o ModelParams a cada passo)."""
+    key = (df_params.lsnr_min, df_params.lsnr_max)
+    if key not in _LSNR_T:
+        from df.modules import LocalSnrTarget
+
+        _LSNR_T[key] = LocalSnrTarget(ws=20, target_snr_range=[df_params.lsnr_min - 1, df_params.lsnr_max + 1])
+    return _LSNR_T[key]
+
+
+def step_v5(model, istft, df_params, hp: StageFHParams, b: dict, a, amp: bool, timer=None, _fwd=None) -> dict:
+    """Mesmas perdas de `step_v5_ref` (paridade em tests/test_losses_fast_v5.py), sem recomputar STFTs/potências e
+    sem sincronizar com o host (ver `cctrain.losses.fast_v5`). A sombra do alvo usa a mesma máscara ERB e o mesmo
+    filtro DF da mistura, aplicados num único lote [mistura; alvo]. `timer(nome)`: contexto opcional de medição."""
+    tm = timer or (lambda _n: nullcontext())
+    spec, spec_clean = b["spec"], b["spec_clean"]
+    nb, T = spec.shape[0], spec.shape[2]
+    with tm("forward"):
+        spec_e, m, lsnr, df_coefs, profile = _fwd if _fwd is not None else _forward_v5(model, b, amp)
+    base = model.base
+    with tm("spectral+shadow"):
+        both = torch.cat([spec, spec_clean], 0)
+        sm2 = base.mask(both.clone(), torch.cat([m, m], 0))
+        spec_m, sm_c = sm2[:nb], sm2[nb:]
+        if amp:  # máscara ERB + filtro DF refeitos em fp32 a partir de m e dos coefs (mistura e alvo juntos)
+            se2 = base.df_op(both.clone(), torch.cat([df_coefs, df_coefs], 0))
+            spec_e = torch.cat([se2[:nb, ..., : base.nb_df, :], spec_m[..., base.nb_df:, :]], dim=-2)
+            se_c = se2[nb:]
+        else:
+            se_c = base.df_op(spec_clean.clone(), df_coefs)
+        se_c = torch.cat([se_c[..., : base.nb_df, :], sm_c[..., base.nb_df:, :]], dim=-2)
+        out, zero = gate_v4(spec, spec_m, spec_e, lsnr, profile)
+        shadow = torch.where(zero[:, None, :, None, None], torch.zeros_like(se_c), se_c)
+    with tm("istft"):
+        est = istft(out)
+        with torch.no_grad():
+            tgt = istft(spec_clean)
+
+    ta = b["target_active"][:, :T]
+    ia = b["interf_active"][:, :T]
+    ds = b["digital_silence"][:, :T]
+    prof = profile[:, None]
+    f_leak = (prof & ~ta & ia & ~ds).float()
+    f_ovl = (prof & ta & ia).float()
+    f_keep = prof & ta & ~ds
+    n_int = b["n_interf"]
+    has_int = (n_int >= 1)[:, None]
+
+    with tm("mr+os"):
+        mr, os_ = fv5.multires_mr_os(est, tgt, b["max_freq"], (n_int >= 1), n_ffts=hp.fft_sizes, gamma=hp.loss_gamma,
+                                     factor=hp.loss_factor, factor_complex=hp.loss_factor_complex, os_factor=hp.lambda_os,
+                                     formant_weight=a.formant_weight, extra_formant_penalty=1.0)
+    with tm("leak+tail+leak_abs+ovl"):
+        p_out = fv5.pow_bins(out)
+        with torch.no_grad():
+            p_mix = fv5.pow_bins(spec)
+            em = p_mix.sum(-1)
+            iw = b["interf_active_wet45"][:, :T]
+            since_i = since_interferer_s(ia)
+            f_tail = (prof & ~ta & ~ia & iw & ~ds & (since_i <= a.tail_s)).float()
+            f_abs = f_leak * (~b["has_target"]).float()[:, None]
+        r = fv5.leak_ratio(p_out.sum(-1), em)
+        leak = fv5.masked_frac(r, f_leak)
+        tail = fv5.masked_frac(r, f_tail)
+        leak_abs = fv5.masked_frac(r, f_abs)
+        with torch.no_grad():
+            p_cl = fv5.pow_bins(spec_clean)
+            p_in = fv5.pow_bins(b["spec_interf"])
+        ovl = fv5.ovl_value(p_out, p_cl, p_in, f_ovl)
+    with tm("lsnr"):
+        with torch.no_grad():
+            lsnr_t = _lsnr_target_cached(df_params)(spec_clean, noise=spec - spec_clean)
+        ls = fv5.local_snr_value(lsnr, lsnr_t, ~ds, a.lsnr_factor)
+    with tm("turn+n0g"):
+        valid = prof & has_int & b["has_target"][:, None] & ta & ~ia & ~ds
+        v0 = prof & (n_int == 0)[:, None] & b["has_target"][:, None] & ta & ~ds
+        turn, tst, n0g, n0st = fv5.turn_pair(fv5.pow_bins(shadow), p_cl, ta, since_i, valid, v0,
+                                             hinge_t=a.turn_hinge_db, hinge_0=a.n0g_hinge_db, boost=a.turn_boost,
+                                             decay_s=a.turn_decay_s)
+    with tm("df_reg"):
+        if df_coefs.numel() > 1:
+            l_df = df_coef_temporal_regularization_loss(df_coefs, time_dim=1) / (df_coefs.numel() / df_coefs.shape[1]) * 0.05
+        else:
+            l_df = est.sum() * 0.0
+
+    parts = {"mr": mr, "os": os_, "leak": a.lambda_leak * leak, "ovl": a.lambda_ovl * ovl, "lsnr": ls,
+             "turn": a.lambda_turn * turn, "n0g": a.lambda_n0g * n0g, "tail": a.lambda_tail * tail,
+             "leak_abs": a.lambda_leak_absent * leak_abs, "df_reg": l_df}
+    total = sum(parts.values())
+    with torch.no_grad():
+        oi = f_leak.bool()
+        stats = {"raw_leak": leak.detach(), "raw_turn": turn.detach(), "raw_n0g": n0g.detach(),
+                 "raw_tail": tail.detach(), "g_turn_db": tst["g_turn_db"], "g_turn_early_db": tst["g_turn_early_db"],
+                 "g_n0_db": n0st["g_turn_db"],
                  "zero_frac_only_interf": (zero & oi).sum() / oi.sum().clamp(min=1),
                  "zero_frac_target": (zero & f_keep).sum() / f_keep.sum().clamp(min=1)}
     return {"total": total, **parts, **stats}
@@ -485,7 +603,7 @@ def main():
         waits.append(t0 - tw)
         b = _to_device_nb(batch, device)
         opt.zero_grad(set_to_none=True)
-        parts = step_v5(model, istft, params, hp, b, a, amp)
+        parts = (step_v5 if a.loss_impl == "fast" else step_v5_ref)(model, istft, params, hp, b, a, amp)
         total = parts["total"]
         finite = torch.isfinite(total).float()
         if world > 1:
