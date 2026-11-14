@@ -255,7 +255,7 @@ def step_v5_sf(model, istft, df_params, hp, b: dict, a, amp: bool) -> dict:
 
 class IstftSF(torch.nn.Module):
     """`df.loss.Istft` sem o teste NOLA de `torch.istft` (que lê a GPU no host e quebra a captura de CUDA Graph):
-    irfft (norm ortho = normalized=True) · janela, overlap-add por `F.fold`, ÷ envelope Σ janela², corte center."""
+    irfft (norm ortho = normalized=True) · janela, overlap-add (unfold_backward), ÷ envelope Σ janela², corte center."""
 
     def __init__(self, istft):
         super().__init__()
@@ -267,8 +267,8 @@ class IstftSF(torch.nn.Module):
         key = (n_frames, str(device), dtype)
         if key not in self._env:
             n = self.n_fft + self.hop * (n_frames - 1)
-            w2 = (self.w.to(device, dtype) ** 2)[None, :, None].expand(1, -1, n_frames)
-            env = F.fold(w2, output_size=(1, n), kernel_size=(1, self.n_fft), stride=(1, self.hop)).reshape(n)
+            w2 = (self.w.to(device, dtype) ** 2)[None, None, :].expand(1, n_frames, -1)
+            env = torch.ops.aten.unfold_backward(w2, [1, n], 1, self.n_fft, self.hop).reshape(n)
             c = self.n_fft // 2
             self._env[key] = env[c:n - c]
         return self._env[key]
@@ -281,7 +281,8 @@ class IstftSF(torch.nn.Module):
         nfr = spec.shape[-1]
         fr = torch.fft.irfft(spec, n=self.n_fft, dim=1, norm="ortho") * self.w.to(spec.real.dtype)[None, :, None]
         n = self.n_fft + self.hop * (nfr - 1)
-        y = F.fold(fr, output_size=(1, n), kernel_size=(1, self.n_fft), stride=(1, self.hop)).reshape(fr.shape[0], n)
+        # overlap-add como o torch.istft (unfold_backward; o backward é um unfold, barato — F.fold/col2im era ~0,1 s/passo)
+        y = torch.ops.aten.unfold_backward(fr.transpose(1, 2), [fr.shape[0], n], 1, self.n_fft, self.hop)
         c = self.n_fft // 2
         y = y[:, c:n - c] / self._envelope(nfr, y.device, y.dtype)
         return y.view(*sh, y.shape[-1]) if xc.ndim > 2 else y
