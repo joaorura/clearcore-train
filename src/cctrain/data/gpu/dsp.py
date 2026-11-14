@@ -101,51 +101,38 @@ def _sos_for(cutoffs: np.ndarray) -> np.ndarray:
     return out
 
 
-def _on_default_stream(fn):
-    """O kernel CUDA do `torchaudio.functional.lfilter` roda na stream padrão (legada), não na corrente: numa
-    `torch.cuda.Stream` lateral (`--gpu-mix-overlap`) ele leria a entrada antes de pronta e a saída seria lida antes de
-    escrita (NaN/lixo). Roda o lfilter inteiro na padrão, sincronizada com a corrente antes e depois; sem custo quando a corrente já é a padrão."""
-    if not torch.cuda.is_available():
-        return fn()
-    cur, dflt = torch.cuda.current_stream(), torch.cuda.default_stream()
-    if cur == dflt:
-        return fn()
-    dflt.wait_stream(cur)
-    with torch.cuda.stream(dflt):  # tudo (também o pad/cópias internos do lfilter) na padrão, depois da entrada
-        out = fn()
-    cur.wait_stream(dflt)
-    out.record_stream(cur)  # memória alocada na padrão, consumida pela corrente
+def _fir_filter(z: torch.Tensor, h: torch.Tensor) -> torch.Tensor:
+    """Resposta do IIR (`h` `[k, L]`: resposta ao impulso truncada, valores já na precisão de `z`) a `z` `[k, T]` com
+    estado inicial de regime para a entrada constante `z[:, 0]`: o passado vira L cópias de `z[:, 0]` (o IIR esquece o
+    estado inicial como r^L < 1e-16, que é como `_warm_len` escolhe L) e a convolução causal é feita por FFT. Só
+    operações torch na stream corrente (o `lfilter` do torchaudio roda na stream padrão e não serve numa stream lateral)."""
+    k, t = z.shape
+    ell = h.shape[1]
+    zp = torch.cat([z[:, :1].expand(k, ell), z], dim=1)
+    nfft = next_fast_len(ell + t + ell - 1, real=True)
+    y = torch.fft.irfft(torch.fft.rfft(zp, n=nfft, dim=1) * torch.fft.rfft(h, n=nfft, dim=1), n=nfft, dim=1)
+    return y[:, ell : ell + t]
+
+
+_IMPULSE: dict[tuple[float, int], np.ndarray] = {}
+
+
+def _impulse_responses(cutoffs: np.ndarray, ell: int) -> np.ndarray:
+    """`[k, ell]` f64: resposta ao impulso da cascata Butterworth(8, fc/Nyquist) de cada corte (um scipy.sosfilt por corte
+    distinto, em cache)."""
+    from scipy.signal import sosfilt
+
+    out = np.empty((len(cutoffs), ell))
+    for i, fc in enumerate(cutoffs):
+        key = (float(fc), ell)
+        if key not in _IMPULSE:
+            if len(_IMPULSE) > 256:
+                _IMPULSE.clear()
+            imp = np.zeros(ell)
+            imp[0] = 1.0
+            _IMPULSE[key] = sosfilt(butter(8, float(fc) / NYQUIST_HZ, output="sos"), imp)
+        out[i] = _IMPULSE[key]
     return out
-
-
-def _sos_pass(y: torch.Tensor, sos: torch.Tensor, warm: int, chunk: int) -> torch.Tensor:
-    """Cascata de biquads (`sos` `[k, 4, 6]`) sobre `y` `[k, T]` com estado inicial de regime para a entrada constante
-    `y[:, 0]` (= `sosfilt_zi * y[:, 0]` do scipy). Em cada seção, y = H(y - y0) de estado zero + G*y0 (G = ganho DC da
-    seção), que é exatamente a solução com zi de regime por linearidade.
-
-    O IIR é inerentemente sequencial no tempo (o `lfilter` do torchaudio percorre as amostras de cada linha em série),
-    então o sinal é cortado em blocos de `chunk` amostras que viram linhas extras do lote, cada um precedido de `warm`
-    amostras do bloco anterior (overlap-save para IIR; o prefixo do primeiro bloco repete y[:, 0], que equivale ao zi de
-    regime). O transiente do estado inicial errado de cada bloco decai como r^warm (r = maior módulo de polo) e é
-    descartado com o prefixo; `warm` é escolhido para r^warm < 1e-16."""
-    import torchaudio.functional as taf
-
-    k, t = y.shape
-    if chunk >= t:
-        warm, chunk = 0, t
-    nc = -(-t // chunk)
-    pad_r = nc * chunk - t
-    yp = torch.cat([y[:, :1].expand(k, warm), y, y[:, -1:].expand(k, pad_r)], dim=1)
-    rows = yp.unfold(1, warm + chunk, chunk).reshape(k * nc, warm + chunk)
-    sos_r = sos.repeat_interleave(nc, dim=0)
-    z = rows
-    for s in range(sos.shape[1]):
-        b, a = sos_r[:, s, :3], sos_r[:, s, 3:]
-        b, a = b / a[:, :1], a / a[:, :1]
-        g = b.sum(dim=1, keepdim=True) / a.sum(dim=1, keepdim=True)
-        z0 = z[:, :1]
-        z = _on_default_stream(lambda: taf.lfilter(z - z0, a, b, clamp=False, batching=True)) + g * z0
-    return z[:, warm:].reshape(k, nc * chunk)[:, :t]
 
 
 def _warm_len(sos: np.ndarray) -> int:
@@ -171,7 +158,9 @@ def lowpass48(x: torch.Tensor, cutoff_hz: torch.Tensor, dtype: torch.dtype = tor
         raise ValueError(f"lowpass48: n={n} <= padlen={_PADLEN}")
     out = x.clone()
     idx = torch.as_tensor(act, device=x.device)
-    sos = torch.as_tensor(_sos_for(cut[act]), device=x.device, dtype=dtype)
+    sos = _sos_for(cut[act])
+    ell = _warm_len(sos)
+    h = torch.as_tensor(_impulse_responses(cut[act], ell), device=x.device, dtype=dtype)
     xs = x[idx].to(dtype)
     ext = torch.cat(
         [
@@ -181,9 +170,7 @@ def lowpass48(x: torch.Tensor, cutoff_hz: torch.Tensor, dtype: torch.dtype = tor
         ],
         dim=1,
     )
-    warm = _warm_len(sos.cpu().numpy())
-    chunk = max(1024, warm)  # menos amostras em série por linha: ~1,8x mais rápido que max(4096, 4·warm) na GPU
-    y = _sos_pass(ext, sos, warm, chunk)
-    y = _sos_pass(y.flip(1), sos, warm, chunk).flip(1)
+    y = _fir_filter(ext, h)
+    y = _fir_filter(y.flip(1), h).flip(1)
     out[idx] = y[:, _PADLEN : _PADLEN + n].to(x.dtype)
     return out
