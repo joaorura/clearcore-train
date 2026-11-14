@@ -94,7 +94,10 @@ for attempt in $(seq 0 "$MAX_RESTARTS"); do
 done
 
 # só roda o eval completo se o treino chegou ao fim (não em parada por sinal/tempo, que será retomada)
-if [ "$QUICK_EVAL" = 1 ] && grep -q '^total_steps' "$RUN_DIR/TRAIN_DONE" 2>/dev/null; then
+# FULL_EVAL=0 (exp/oracle-ceiling): sem eval completo; espera o avaliador rápido terminar os snapshots pendentes
+if [ "${FULL_EVAL:-1}" = 0 ]; then
+  [ -n "$WP" ] && { for _ in $(seq 1 90); do kill -0 "$WP" 2>/dev/null || break; sleep 20; done; kill "$WP" 2>/dev/null || true; }
+elif [ "$QUICK_EVAL" = 1 ] && grep -q '^total_steps' "$RUN_DIR/TRAIN_DONE" 2>/dev/null; then
   sed -e "s#^ROOT=.*#ROOT=$ROOT#" -e "s#^WT=.*#WT=$CODE#" -e "s#^PY=.*#PY=$PY#" scripts/after_train_eval_v42.sh \
     >"$RUN_DIR/after_train_eval_rig.sh"
   TRAIN_PID=999999999 WATCH_PID="$WP" RUN_DIR="$RUN_DIR" EVAL_WORKERS=4 \
