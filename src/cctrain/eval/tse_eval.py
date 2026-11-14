@@ -125,6 +125,10 @@ def build_model(ckpt: Path, arch: str, device: str):
         from cctrain.models.pdfnet3_pro import attach_lsnr_correction
 
         attach_lsnr_correction(m, float(ck.extra["lsnr_corr"]))
+    if ck.extra.get("oracle"):  # exp/oracle-ceiling: presença verdadeira como entrada (tracks via Runner.oracle_tracks)
+        from cctrain.models.oracle import OracleConfig, attach_oracle
+
+        attach_oracle(m, OracleConfig.from_dict(ck.extra["oracle"]))
     m.load_state_dict(ck.model, strict=True)
     return m.eval()
 
@@ -137,8 +141,8 @@ class ProfileFrameModel(rp.TorchFrameModel):
     Para presença/soft o lsnr entregue à réplica é sintético (0 = ERB+DF, -100 = ZERO) com limiares (-10, inf, inf).
     """
 
-    def __init__(self, model, embedding, audio, thresholds=None):
-        _, self.feat_erb, self.feat_spec = rp.replica_features(audio)
+    def __init__(self, model, embedding, audio, thresholds=None, oracle_tracks=None):
+        active, self.feat_erb, self.feat_spec = rp.replica_features(audio)
         self.lsnr = np.zeros(0, np.float32)
         self.lsnr_true = self.lsnr
         self.p = np.zeros(0, np.float32)
@@ -157,14 +161,37 @@ class ProfileFrameModel(rp.TorchFrameModel):
             from cctrain.models.adapters import set_gate
 
             set_gate(model, m.reshape(-1), emb_spk)
+        od = None
+        if getattr(model, "oracle_cond", None) is not None:  # exp/oracle-ceiling
+            from cctrain.models.oracle import eval_oracle_frames
+
+            if oracle_tracks is None:
+                raise ValueError("modelo com oráculo exige Runner.oracle_tracks (alvo, interferentes)")
+            tgt, ints, seed = oracle_tracks
+            n = len(audio)
+            tgt = np.pad(np.asarray(tgt, np.float32).reshape(-1), (0, max(0, n - np.size(tgt))))[:n]
+            ints = np.atleast_2d(np.asarray(ints, np.float32))
+            ints = np.pad(ints, ((0, 0), (0, max(0, n - ints.shape[1]))))[:, :n]
+            o = eval_oracle_frames(tgt, ints, active, model.oracle_cfg, seed)[: self.n]
+            with torch.no_grad():
+                od = model.oracle_cond(torch.from_numpy(o)[None].to(dev), m)
         with torch.no_grad():
             self._v = model.film(emb_spk, m)
+            film_enc = (self._v.gamma_enc, self._v.beta_enc)
+            self._film_df = (self._v.gamma_df, self._v.beta_df)
+            if od is not None:
+                film_enc = (self._v.gamma_enc, self._v.beta_enc + od["enc_b"])
+                self._film_df = (self._v.gamma_df * (1.0 + od["df_g"]), self._v.beta_df + od["df_b"])
             ferb = ferb + (model.freq_mixer(ferb) - ferb) * m.view(-1, 1, 1, 1)
-            e0, e1, e2, e3, emb, c0, lsnr = base.enc(ferb, fspec, film=(self._v.gamma_enc, self._v.beta_enc))
+            e0, e1, e2, e3, emb, c0, lsnr = base.enc(ferb, fspec, film=film_enc)
             a = model.cross_attn(emb, emb_spk, mask=m)
             if getattr(model, "lsnr_corr", None) is not None:  # pro-v5-keep
                 lsnr = lsnr + model.lsnr_corr(a.output) * (model.lsnr_corr_scale * m.reshape(-1, 1, 1))
-            self._enc = (e0, e1, e2, e3, c0, a.output, a.subband_gains[0, 0])
+            emb_erb = a.output
+            if od is not None:
+                lsnr = lsnr + od["lsnr"] * model.lsnr_corr_scale
+                emb_erb = a.output * (1.0 + od["erb_g"]) + od["erb_b"]
+            self._enc = (e0, e1, e2, e3, c0, a.output, a.subband_gains[0, 0], emb_erb)
             self.lsnr_true = lsnr.reshape(-1).cpu().numpy().astype(np.float32)
             if getattr(model, "presence", None) is not None:
                 logit, _ = model.presence(a.output, emb_spk)
@@ -193,18 +220,20 @@ class ProfileFrameModel(rp.TorchFrameModel):
             flags = [rp.apply_stages(x, thr) for x in self.lsnr]
         dev = next(self._model.parameters()).device
         base = self._model.base
-        e0, e1, e2, e3, c0, emb_d, sg = self._enc
+        e0, e1, e2, e3, c0, emb_d, sg, emb_erb = self._enc
+        gdf, bdf = self._film_df
         erb_idx = [t for t, f in enumerate(flags) if f[0]]
         df_idx = [t for t, f in enumerate(flags) if f[2]]
         with torch.no_grad():
             if erb_idx:
                 i = torch.tensor(erb_idx, device=dev)
-                mm = base.erb_dec(emb_d[:, i], e3[:, :, i], e2[:, :, i], e1[:, :, i], e0[:, :, i]) * sg[i][None, None]
+                mm = base.erb_dec(emb_erb[:, i], e3[:, :, i], e2[:, :, i], e1[:, :, i], e0[:, :, i]) * sg[i][None, None]
                 mm = mm.cpu().numpy()
                 self.gains = {t: mm[0, 0, k].astype(np.float32) for k, t in enumerate(erb_idx)}
             if df_idx:
                 i = torch.tensor(df_idx, device=dev)
-                c = base.df_dec(emb_d[:, i], c0[:, :, i], film=(self._v.gamma_df, self._v.beta_df))
+                fdf = (gdf if gdf.shape[1] == 1 else gdf[:, i], bdf if bdf.shape[1] == 1 else bdf[:, i])
+                c = base.df_dec(emb_d[:, i], c0[:, :, i], film=fdf)
                 c = c[0].cpu().numpy().reshape(len(df_idx), rp.NB_DF, rp.DF_ORDER, 2)
                 self.coefs = {t: (c[k, ..., 0] + 1j * c[k, ..., 1]).astype(np.complex64) for k, t in enumerate(df_idx)}
         return thr, frame_gain
@@ -223,6 +252,7 @@ class Runner:
             set_gate(self.base_cpu, None)
         self.gating = Gating.of(gating) if isinstance(gating, str) else gating
         self.thr = self.gating.thr
+        self.oracle_tracks = None  # exp/oracle-ceiling: (alvo, interferentes [N,T], semente), definido por quem chama
 
     @staticmethod
     def _padded(noisy: np.ndarray) -> tuple[np.ndarray, int]:
@@ -246,7 +276,7 @@ class Runner:
                   shadow: list[np.ndarray] | None = None) -> dict[str, tuple]:
         """Vários gatings sobre o MESMO encoder (o forward do encoder é o custo; os decoders rodam por gating)."""
         audio, n = self._padded(noisy)
-        pm = ProfileFrameModel(self.model, profile, audio)
+        pm = ProfileFrameModel(self.model, profile, audio, oracle_tracks=getattr(self, "oracle_tracks", None))
         out = {}
         for name, g in gatings.items():
             thr, fg = pm.set_gating(g)

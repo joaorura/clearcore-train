@@ -216,7 +216,50 @@ def parse_args(argv=None):
     p.add_argument("--p10-q", type=float, default=0.10)
     p.add_argument("--p10-hinge-db", type=float, default=-3.0)
     p.add_argument("--p10-min-frames", type=int, default=20)
+    # exp/oracle-ceiling (cctrain.models.oracle; desligado por padrão = caminho de antes)
+    p.add_argument("--oracle", choices=("none", "clean", "noisy"), default="none",
+                   help="entrada extra com a presença VERDADEIRA do alvo/interferente por quadro (teste de teto)")
+    p.add_argument("--oracle-delay-ms", type=float, default=150.0, help="--oracle noisy: atraso")
+    p.add_argument("--oracle-err", type=float, default=0.10, help="--oracle noisy: fração de quadros em erro (rajadas)")
+    p.add_argument("--oracle-burst-ms", type=float, default=200.0, help="--oracle noisy: duração da rajada")
+    p.add_argument("--free-grus", action="store_true",
+                   help="libera os pesos das 3 GRUs da base (enc.emb_gru, erb_dec.emb_gru, df_dec.df_gru)")
+    p.add_argument("--free-gru-lr-mult", type=float, default=0.1, help="LR das GRUs liberadas = lr × este fator")
     return p.parse_args(argv)
+
+
+def oracle_cfg_of(a):
+    from cctrain.models.oracle import OracleConfig
+
+    if getattr(a, "oracle", "none") == "none":
+        return None
+    if a.oracle == "clean":
+        return OracleConfig("clean")
+    return OracleConfig("noisy", delay_frames=int(round(a.oracle_delay_ms / 10)), err_frac=a.oracle_err,
+                        burst_frames=int(round(a.oracle_burst_ms / 10)))
+
+
+def make_oracle(b: dict, cfg, gen=None):
+    """[B,T,3] float a partir dos rótulos do lote (alvo pico−30, interferente molhado pico−45), fora do grafo."""
+    from cctrain.models import oracle as orc
+
+    T = b["spec"].shape[2]
+    ta = b["target_active"][:, :T].bool()
+    ia = b["interf_active_wet45"][:, :T].bool()
+    return orc.features(orc.corrupt_torch(ta, cfg, gen), orc.corrupt_torch(ia, cfg, gen))
+
+
+def free_gru_params(model) -> list:
+    from cctrain.models.adapters import GRU_SITES, _get
+
+    out = []
+    for site in GRU_SITES:
+        m = _get(model.base, site)
+        m = getattr(m, "orig", m)
+        for p_ in m.parameters():
+            p_.requires_grad_(True)
+            out.append(p_)
+    return out
 
 
 def keep_on(a) -> bool:
@@ -349,8 +392,9 @@ def _forward_v5(model, b: dict, amp: bool):
     profile = mask.reshape(nb) > 0
     dt = amp if isinstance(amp, torch.dtype) else torch.bfloat16  # amp: dtype (perf/v5-speed) ou bool
     ctx = torch.autocast("cuda", dtype=dt) if amp else nullcontext()
+    okw = {"oracle": b["oracle"]} if "oracle" in b else {}
     with ctx:
-        spec_e, m, lsnr, df_coefs = model(spec.clone(), b["feat_erb"], b["feat_spec"], b["embedding"], mask)
+        spec_e, m, lsnr, df_coefs = model(spec.clone(), b["feat_erb"], b["feat_spec"], b["embedding"], mask, **okw)
     spec_e, m, lsnr, df_coefs = spec_e.float(), m.float(), lsnr.float(), df_coefs.float()
     return spec_e, m, lsnr, df_coefs, profile
 
@@ -511,6 +555,11 @@ def build_v5(a, device: str, hp: StageFHParams, paths: Paths):
         from cctrain.models.pdfnet3_pro import attach_lsnr_correction
 
         attach_lsnr_correction(model, a.lsnr_corr)
+    ocfg = oracle_cfg_of(a)
+    if ocfg is not None:  # exp/oracle-ceiling
+        from cctrain.models.oracle import attach_oracle
+
+        attach_oracle(model, ocfg)
     if getattr(a, "init_from", None):  # fine-tune: só o state_dict do modelo; mesma arquitetura (strict)
         ck = Path(a.init_from)
         model.load_state_dict(load_checkpoint(ck).model, strict=True)
@@ -639,10 +688,18 @@ def main():
     clip = a.grad_clip if a.grad_clip is not None else hp.grad_clip
     model, acfg, sites, base_kind, train_cond, init_desc = build_v5(a, device, hp, paths)
     trainable = prepare(model, train_cond)
+    gru_free = free_gru_params(model) if a.free_grus else []
+    trainable = trainable + gru_free
     broadcast_params(trainable, world)
+    ocfg = oracle_cfg_of(a)
+    ogen = None
+    if ocfg is not None and device.startswith("cuda"):
+        ogen = torch.Generator(device=device)
+        ogen.manual_seed(a.seed + 7919 * rank)
     counts = count_params(model)
     n_tr = sum(p.numel() for p in trainable)
     if is0:
+        log(f"oráculo {ocfg} | GRUs livres {len(gru_free)} tensores (lr × {a.free_gru_lr_mult})")
         log(f"base {base_kind} ({init_desc}) | variante {a.variant} | adaptadores {acfg.to_dict()} | sítios {sites} | "
             f"parâmetros {json.dumps(counts)} | treináveis {n_tr} ({100 * n_tr / counts['total']:.2f}%)")
     setup_precision(model, a, amp)
@@ -696,11 +753,19 @@ def main():
                           a.p10_q, a.p10_hinge_db, a.p10_min_frames]
     if a.init_from:  # fine-tune (fora do hash quando ausente: runs existentes mantêm o hash)
         hashed["init_from"] = str(Path(a.init_from).resolve())
+    if ocfg is not None or a.free_grus:  # exp/oracle-ceiling
+        hashed["oracle"] = [None if ocfg is None else ocfg.to_dict(), a.free_grus, a.free_gru_lr_mult]
     if a.profile_drop_mode != "sample":  # padrão fora do hash: runs existentes mantêm o hash
         hashed["drop_mode"] = a.profile_drop_mode  # o bloco = lote por rank (muda com o nº de GPUs, fora do hash)
     chash = config_hash(hashed)
     okw = {"fused": True} if a.opt_impl == "fused" else ({"foreach": True} if a.opt_impl == "foreach" else {})
-    opt = torch.optim.AdamW(trainable, lr=lr, weight_decay=a.weight_decay, **okw)
+    if gru_free:
+        gids = {id(p_) for p_ in gru_free}
+        groups = [{"params": [p_ for p_ in trainable if id(p_) not in gids]},
+                  {"params": gru_free, "lr": lr * a.free_gru_lr_mult}]
+        opt = torch.optim.AdamW(groups, lr=lr, weight_decay=a.weight_decay, **okw)
+    else:
+        opt = torch.optim.AdamW(trainable, lr=lr, weight_decay=a.weight_decay, **okw)
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: lr_factor(s, warmup, total_steps))
     log_path = run_dir / "loss-log.jsonl"
     existing = load_latest(ckpt_dir, expected_cfg_hash=chash)
@@ -712,7 +777,7 @@ def main():
         restore_rng(existing)
         step = existing.step
         spent_before = float(existing.extra.get("elapsed_s", 0.0))
-        trainable = prepare(model, train_cond)
+        trainable = prepare(model, train_cond) + (free_gru_params(model) if a.free_grus else [])
         if runner is not None:
             runner.trainable = trainable
         if is0:
@@ -761,6 +826,7 @@ def main():
                               extra={"elapsed_s": elapsed(), "reason": reason, "args": vars(a), "v4": vp.hashable(),
                                      "presence_head": False, "adapter": acfg.to_dict(), "data": data_tag, "base": base_kind,
                                      "init": init_desc, "train_cond": train_cond, "world": world, "lsnr_corr": a.lsnr_corr,
+                                     "oracle": None if ocfg is None else ocfg.to_dict(), "free_grus": a.free_grus,
                                      "gating": {"mode": "lsnr-profile", "zero_below_db": -10.0},
                                      "wall": time.strftime("%Y-%m-%d %H:%M:%S")})
         log(f"checkpoint {pth} ({reason})")
@@ -856,6 +922,8 @@ def main():
         t0 = time.perf_counter()
         waits.append(t0 - tw)
         b = _to_device_nb(batch, device)
+        if ocfg is not None:
+            b["oracle"] = make_oracle(b, ocfg, ogen)
         if defer:
             if a.skip_off_batches and on is False:  # lote todo sem perfil: grad exatamente 0, sem forward
                 parts = None

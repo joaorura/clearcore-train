@@ -125,6 +125,8 @@ class PDFNet3Pro(PDFNet3):
         # correção (state_dict igual ao de antes). Ver `attach_lsnr_correction`.
         self.lsnr_corr = None
         self.lsnr_corr_scale = 10.0
+        # exp/oracle-ceiling: condicionamento pela presença verdadeira (cctrain.models.oracle); None = sem oráculo
+        self.oracle_cond = None
 
     def forward(
         self,
@@ -137,6 +139,7 @@ class PDFNet3Pro(PDFNet3):
         return_attention_details: bool = False,
         speaker_tokens: Tensor | None = None,
         return_presence: bool = False,
+        oracle: Tensor | None = None,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor] | tuple[tuple[Tensor, Tensor, Tensor, Tensor], SubbandAttentionOutput]:
         """Forward do pDFNet3Pro com suporte a Dual-Conditioning e fallback gracioso.
 
@@ -191,11 +194,18 @@ class PDFNet3Pro(PDFNet3):
         mask_t = mask.view(-1, 1, 1, 1)
         pad_erb = pad_erb + delta_erb * mask_t
 
+        od = None
+        film_enc, film_df = (v.gamma_enc, v.beta_enc), (v.gamma_df, v.beta_df)
+        if self.oracle_cond is not None and oracle is not None:  # exp/oracle-ceiling (× máscara de perfil)
+            od = self.oracle_cond(oracle.to(v.beta_enc.dtype), mask)
+            film_enc = (v.gamma_enc, v.beta_enc + od["enc_b"])
+            film_df = (v.gamma_df * (1.0 + od["df_g"]), v.beta_df + od["df_b"])
+
         # Executa Encoder com FiLM macro
         e0, e1, e2, e3, emb, c0, lsnr = self.base.enc(
             pad_erb,
             pad_spec,
-            film=(v.gamma_enc, v.beta_enc),
+            film=film_enc,
         )
 
         # 3. Fine Conditioning: Cross-Attention Causal em Sub-bandas
@@ -205,6 +215,8 @@ class PDFNet3Pro(PDFNet3):
         emb_conditioned = attn_out.output
         if self.lsnr_corr is not None:  # só com perfil (mask = 0 soma 0: sem perfil o lsnr é o da base, bit a bit)
             lsnr = lsnr + self.lsnr_corr(emb_conditioned) * (self.lsnr_corr_scale * mask.reshape(-1, 1, 1))
+        if od is not None:
+            lsnr = lsnr + od["lsnr"] * self.lsnr_corr_scale
         p_logit = None
         if return_presence:
             if self.presence is None:
@@ -231,6 +243,9 @@ class PDFNet3Pro(PDFNet3):
             idcs = None
             emb_dec = emb_conditioned
             e0_dec, e1_dec, e2_dec, e3_dec, c0_dec = e0, e1, e2, e3, c0
+        if od is not None and idcs is not None:
+            raise NotImplementedError("oráculo com lsnr_dropout")
+        emb_erb = emb_dec if od is None else emb_dec * (1.0 + od["erb_g"]) + od["erb_b"]
 
         # 4. ERB Decoder + modulação fina de sub-bandas
         if getattr(self.base, "run_erb", True):
@@ -238,7 +253,7 @@ class PDFNet3Pro(PDFNet3):
                 m_sub = self.base.erb_dec(emb_dec, e3_dec, e2_dec, e1_dec, e0_dec)
                 m[:, :, idcs] = m_sub * attn_out.subband_gains[:, :, idcs]
             else:
-                m_sub = self.base.erb_dec(emb_dec, e3_dec, e2_dec, e1_dec, e0_dec)
+                m_sub = self.base.erb_dec(emb_erb, e3_dec, e2_dec, e1_dec, e0_dec)
                 m = m_sub * attn_out.subband_gains
             spec_m = self.base.mask(spec, m)
         else:
@@ -253,7 +268,7 @@ class PDFNet3Pro(PDFNet3):
                 )
             else:
                 df_coefs = self.base.df_dec(
-                    emb_dec, c0_dec, film=(v.gamma_df, v.beta_df)
+                    emb_dec, c0_dec, film=film_df
                 )
             df_coefs = self.base.df_out_transform(df_coefs)
             spec_e = self.base.df_op(spec.clone(), df_coefs)

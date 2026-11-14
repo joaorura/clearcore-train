@@ -95,7 +95,9 @@ def run_items(recs: list[dict], runners: dict, with_dfn3: bool, bins_acc: dict |
         comps = [r.target, r.noise]
         prof = eq.profile_of(rec)
         got = []
+        seed = int.from_bytes(str(rec["id"]).encode()[-8:].rjust(8, b"\0"), "little") % (2**31)
         for mk, rn in runners.items():
+            rn.oracle_tracks = (r.target, r.interf, seed)  # exp/oracle-ceiling (ignorado sem oráculo)
             enh, st, sh = rn.run(noisy, prof, shadow=comps)
             got.append((f"{mk}_new", "mix", te.item_metrics("mix", rec, r, noisy, enh, st, base, sh, None)))
             if bins_acc is not None and c["axis"] == "user" and c["n"] == 1 and c["noise"] == "silent":
@@ -107,6 +109,7 @@ def run_items(recs: list[dict], runners: dict, with_dfn3: bool, bins_acc: dict |
                 got.append((f"{mk}_noprof", "noprof", te.item_metrics("noprof", rec, r, noisy, enh, st, base, sh, None)))
             if c["axis"] == "user" and c["n"] > 0:
                 ni = r.noisy(False)
+                rn.oracle_tracks = (np.zeros_like(r.target), r.interf, seed)
                 enh, st = rn.run(ni, prof)
                 got.append((f"{mk}_new", "int", te.item_metrics("int", rec, r, ni, enh, st, base)))
         if with_dfn3 and c["n"] == 0 and c["axis"] == "noise":
