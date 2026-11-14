@@ -151,6 +151,20 @@ def parse_args(argv=None):
     p.add_argument("--device", default="cuda")
     p.add_argument("--gpu-mix", action="store_true",
                    help="workers só sorteiam a receita; mistura, rótulos e features na GPU (cctrain.data.gpu, fora do hash)")
+    # desempenho (perf/v5-graph; todos desligados por padrão = caminho original; fora do hash)
+    p.add_argument("--sync-free", action="store_true",
+                   help="passo sem sync do host (cctrain.train.v5_fast.step_v5_sf; gate estático em lote homogêneo)")
+    p.add_argument("--step-mode", choices=("eager", "graph", "compile"), default="eager",
+                   help="graph = CUDA Graph de forward+perdas+backward por estado de perfil; compile = torch.compile do "
+                        "forward+perdas (--compile-mode). graph/compile implicam --sync-free")
+    p.add_argument("--compile-mode", default="default",
+                   choices=("default", "reduce-overhead", "max-autotune-no-cudagraphs", "max-autotune"))
+    p.add_argument("--cudnn-benchmark", action="store_true")
+    p.add_argument("--channels-last", action="store_true", help="modelo em channels_last (convs 2D)")
+    p.add_argument("--opt-impl", choices=("default", "foreach", "fused"), default="default", help="implementação do AdamW")
+    p.add_argument("--log-every", type=int, default=1,
+                   help="lê as perdas no host a cada N passos (1 = original). Com --sync-free e N > 1 a perda não finita "
+                        "pula o passo na GPU (exige --opt-impl fused, found_inf) e a paciência é conferida a cada N")
     return p.parse_args(argv)
 
 
@@ -391,6 +405,24 @@ def main():
         model.base.df_dec = torch.compile(model.base.df_dec, dynamic=False)
     istft = Istft(960, HOP, torch.as_tensor(_fft_window())).to(device)
     params = ModelParams()
+    fast = a.sync_free or a.step_mode != "eager"
+    defer = fast and a.log_every > 1
+    if a.cudnn_benchmark:
+        torch.backends.cudnn.benchmark = True
+    if a.channels_last:
+        model.to(memory_format=torch.channels_last)
+    if defer and a.opt_impl != "fused":
+        raise SystemExit("--log-every > 1 com --sync-free exige --opt-impl fused (pulo de passo não finito na GPU)")
+    runner = None
+    if fast:
+        from cctrain.train.v5_fast import StepRunner
+
+        runner = StepRunner(model, istft, params, hp, a, amp, trainable, mode=a.step_mode,
+                            compile_mode=a.compile_mode)
+        if is0:
+            log(f"passo rápido: modo {a.step_mode}{' ' + a.compile_mode if a.step_mode == 'compile' else ''} | "
+                f"cudnn.benchmark {a.cudnn_benchmark} | channels_last {a.channels_last} | AdamW {a.opt_impl} | "
+                f"log a cada {a.log_every}")
 
     vp = V4Params(seed=a.seed, segment_s=a.segment_s, batch_size=a.global_batch, total_steps=total_steps,
                   phase1_frac=0.0, n_probs=_np(a.n_probs, 5, N_PROBS), pattern_probs=_np(a.pattern_probs, 4, PATTERN_PROBS),
@@ -403,7 +435,8 @@ def main():
                           a.lambda_tail, a.tail_s, a.lambda_leak_absent],
               "turn": [a.turn_hinge_db, a.turn_boost, a.turn_decay_s], "fw": a.formant_weight, "v5": 1, "data": DATA_TAG}
     chash = config_hash(hashed)
-    opt = torch.optim.AdamW(trainable, lr=lr, weight_decay=a.weight_decay)
+    okw = {"fused": True} if a.opt_impl == "fused" else ({"foreach": True} if a.opt_impl == "foreach" else {})
+    opt = torch.optim.AdamW(trainable, lr=lr, weight_decay=a.weight_decay, **okw)
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: lr_factor(s, warmup, total_steps))
     log_path = run_dir / "loss-log.jsonl"
     existing = load_latest(ckpt_dir, expected_cfg_hash=chash)
@@ -416,6 +449,8 @@ def main():
         step = existing.step
         spent_before = float(existing.extra.get("elapsed_s", 0.0))
         trainable = prepare(model, train_cond)
+        if runner is not None:
+            runner.trainable = trainable
         if is0:
             _truncate(log_path, step)
             log(f"RETOMADA de {existing.path.name} (passo {step}; ranks agora {world})")
@@ -468,6 +503,59 @@ def main():
     stop_reason = "total_steps" if end_step == total_steps else "max_steps"
     bad_run = 0
     lf = open(log_path, "a") if is0 else None
+    pend: list = []  # --log-every: (passo, hora, vetor das perdas na GPU) ainda não lidos
+    pend_wait: list = []
+    pkeys: list = []
+    bad = {"run": 0, "t": time.perf_counter()}
+
+    def flush_pending() -> str | None:
+        """Lê de uma vez as perdas pendentes (um sync) e reproduz o log por passo do laço original."""
+        if not pend:
+            return None
+        torch.cuda.synchronize(device) if device.startswith("cuda") else None
+        now = time.perf_counter()
+        n = len(pend)
+        gpu_dt = max(0.0, (now - bad["t"] - sum(pend_wait)) / n)
+        bad["t"] = now
+        vals = torch.stack([v for _, _, v in pend]).cpu().tolist()
+        why = None
+        for (st, wall, _), wt, row_v in zip(pend, pend_wait, vals):
+            step_times.append(gpu_dt)
+            row = dict(zip(pkeys, row_v[:-2]))
+            gnv, nf = row_v[-2], row_v[-1]
+            if nf > 0:
+                bad["run"] += 1
+                if is0:
+                    log(f"perda não finita no passo {st - 1} ({bad['run']} seguidos)")
+                if bad["run"] >= a.nan_patience:
+                    why = "nan"
+                continue
+            bad["run"] = 0
+            if not is0:
+                continue
+            mr = max(row["mr"], 1e-9)
+            for k in TERMS[1:]:
+                rel_hist[k].append(row[k] / mr)
+            if st % 20 == 0 or st <= 3:
+                rel = {f"rel_{k}": float(np.median(v)) for k, v in rel_hist.items()}
+                lf.write(json.dumps({"step": st, "lr": float(sched.get_last_lr()[0]), **row, "grad_norm": gnv,
+                                     "dt": gpu_dt, "wait": wt, **rel, "wall": wall}) + "\n")
+                lf.flush()
+            if st % 25 == 0 or st <= 3:
+                sps = statistics.median(step_times)
+                wtm = statistics.median(waits)
+                mem = torch.cuda.max_memory_allocated(device) / GIB if device.startswith("cuda") else 0.0
+                eta_h = (end_step - st) * (sps + wtm) / 3600
+                log(f"passo {st}/{end_step} total={row['total']:.3f} mr={row['mr']:.3f} s/passo={sps:.3f} "
+                    f"espera={wtm:.3f} amostras/s={a.global_batch / max(sps + wtm, 1e-9):.1f} "
+                    f"lr={sched.get_last_lr()[0]:.2e} gTurn={row['g_turn_db']:+.1f} "
+                    f"gTurn0.5={row['g_turn_early_db']:+.1f} gN0={row['g_n0_db']:+.1f} "
+                    f"zeroOI={row['zero_frac_only_interf']:.2f} zeroT={row['zero_frac_target']:.3f} gn={gnv:.2f} "
+                    f"vram={mem:.1f}GiB ETA={eta_h:.1f}h")
+        pend.clear()
+        pend_wait.clear()
+        return why
+
     it = iter(dl)
     while step < end_step:
         tw = time.perf_counter()
@@ -476,6 +564,11 @@ def main():
         except StopIteration:
             stop_reason = "data_end"
             break
+        on = None
+        if fast:  # estado de perfil do lote, sabido no host (receita/CPU) sem ler a GPU
+            from cctrain.train.v5_fast import batch_profile_state
+
+            on = batch_profile_state(batch["mask0"] if mixer is not None else batch["mask"].reshape(-1) <= 0)
         if mixer is not None:  # a mistura na GPU conta como espera por dados
             batch = mixer(batch)
             n_refill += mixer.fill_invalid(batch, ds)
@@ -484,8 +577,53 @@ def main():
         t0 = time.perf_counter()
         waits.append(t0 - tw)
         b = _to_device_nb(batch, device)
+        if defer:
+            parts = runner(b, on)
+            if not pkeys:
+                pkeys.extend(parts.keys())
+            nonfin = (~torch.isfinite(parts["total"])).float().reshape(())
+            if world > 1:
+                dist.all_reduce(nonfin, op=dist.ReduceOp.MAX)
+                allreduce_grads(trainable, world)
+            opt.found_inf = nonfin  # AdamW fused: pula o passo (e não conta o step) se a perda não é finita
+            gn = torch.nn.utils.clip_grad_norm_(trainable, clip)
+            opt.step()
+            sched.step()
+            step += 1
+            pend.append((step, time.strftime("%H:%M:%S"),
+                         torch.stack([parts[k].detach().float().reshape(()) for k in pkeys] + [gn.float(), nonfin])))
+            pend_wait.append(waits[-1])
+            if step % a.log_every == 0 or step <= 3 or step >= end_step:
+                why = flush_pending()
+                if why:
+                    stop_reason = why
+                    break
+            if step % 200 == 0 and not all(bool(torch.isfinite(p).all()) for p in trainable):
+                stop_reason = "nan_params"
+                log(f"parâmetro não finito no passo {step}")
+                break
+            if world == 1:
+                if stop["flag"] or (deadline and time.time() >= deadline):
+                    stop_reason = f"signal:{stop['why']}" if stop["flag"] else "stop_at"
+                    break
+            else:
+                flag = torch.tensor([1.0 if (stop["flag"] or (deadline and time.time() >= deadline)) else 0.0],
+                                    device=device)
+                dist.all_reduce(flag, op=dist.ReduceOp.MAX)
+                if flag.item() > 0:
+                    stop_reason = f"signal:{stop['why']}" if stop["flag"] else "stop_at"
+                    break
+            if eval_every and step % eval_every == 0:
+                save("eval-snapshot", snap_dir, keep=10_000)
+            if is0 and time.monotonic() - last_ckpt >= a.ckpt_every_min * 60.0:
+                save("periodic")
+                last_ckpt = time.monotonic()
+            continue
         opt.zero_grad(set_to_none=True)
-        parts = step_v5(model, istft, params, hp, b, a, amp)
+        if runner is not None:  # --sync-free com log a cada passo: mesmo laço, passo sem sync
+            parts = runner(b, on)
+        else:
+            parts = step_v5(model, istft, params, hp, b, a, amp)
         total = parts["total"]
         finite = torch.isfinite(total).float()
         if world > 1:
@@ -501,7 +639,8 @@ def main():
                 break
             continue
         bad_run = 0
-        total.backward()
+        if runner is None:
+            total.backward()
         allreduce_grads(trainable, world)
         gn = torch.nn.utils.clip_grad_norm_(trainable, clip)
         opt.step()
@@ -547,6 +686,8 @@ def main():
         if is0 and time.monotonic() - last_ckpt >= a.ckpt_every_min * 60.0:
             save("periodic")
             last_ckpt = time.monotonic()
+    if defer:
+        flush_pending()
     p = save(f"final:{stop_reason}")
     if eval_every and step % eval_every != 0:
         save("eval-snapshot-final", snap_dir, keep=10_000)

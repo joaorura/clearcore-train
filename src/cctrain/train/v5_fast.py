@@ -342,7 +342,9 @@ class StepRunner:
             parts["total"].backward()
         finally:
             self._set_static(None)
-        return parts
+        # sem referência ao grafo do autograd fora daqui: um AccumulateGrad vivo guarda a stream em que foi criado e,
+        # se for a stream padrão (legada), a captura seguinte falha ("legacy stream depend on a capturing stream")
+        return {k: v.detach() for k, v in parts.items()}
 
     def _graph_step(self, b: dict, on: bool) -> dict:
         st = self.graphs.get(on)
@@ -372,10 +374,11 @@ class StepRunner:
             for p in self.trainable:
                 p.grad = None
             graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(graph):
+            with torch.cuda.graph(graph, capture_error_mode="thread_local"):  # thread do pin_memory
                 parts = self._loss(static_b)
                 parts["total"].backward()
             grads = [p.grad for p in self.trainable]
+            parts = {k: v.detach() for k, v in parts.items()}
         finally:
             self._set_static(None)
         return static_b, graph, parts, grads
