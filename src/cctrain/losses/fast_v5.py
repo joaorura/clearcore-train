@@ -20,7 +20,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
-from cctrain.losses.dfnet import _EPS, SR, _stft, formant_frequency_weights
+from cctrain.losses.dfnet import _EPS, SR, _angle, _stft, formant_frequency_weights
 
 _FW_CACHE: dict = {}
 
@@ -42,26 +42,15 @@ def bin_weights(max_freq: Tensor | float, n_fft: int, batch: int, sr: int, devic
     return (freqs[None, :] <= mf[:, None]).to(torch.float32)
 
 
-def _angle_re_im():
-    from cctrain.dfvendor import ensure_df_importable
-
-    ensure_df_importable()
-    from df.utils import angle_re_im  # o mesmo gradiente robusto do `angle` usado por dfnet_loss, em (re, im)
-
-    return angle_re_im
-
-
-def _res_terms(yr: Tensor, s_abs: Tensor, s_c: Tensor, w: Tensor, fw: Tensor, fmask: Tensor, gamma: float,
+def _res_terms(a: Tensor, phi: Tensor, s_abs: Tensor, s_c: Tensor, w: Tensor, fw: Tensor, fmask: Tensor, gamma: float,
                pen: float) -> tuple[Tensor, Tensor, Tensor]:
     """Termos por amostra `[B]` de uma resolução: (|·|^γ do L_mr, complexo do L_mr, L_os), em aritmética real.
 
-    `yr` = view_as_real(STFT da saída) `[B,F,T,2]`. Equivale a `y.abs().clamp_min(ε).pow(γ)` (= (re²+im²)
-    limitado a ε² elevado a γ/2; o gradiente é zero abaixo de ε nos dois) e a `|y|^γ·exp(i·angle(y))` (cos/sin do
-    `angle_re_im`, mesmo backward do `angle` do upstream). Uma função só, para o torch.compile fundir tudo."""
-    re, im = yr[..., 0], yr[..., 1]
-    p = (re * re + im * im).clamp_min(_EPS * _EPS).pow(gamma / 2)
-    phi = _angle_re_im().apply(re, im)
-    T = yr.shape[-2]
+    `a` = |Y| e `phi` = angle(Y) (o `angle` robusto do upstream) da STFT da saída, calculados fora (complexos, com
+    os mesmos gradientes da referência); aqui `|Y|^γ·exp(i·phi)` vira (|Y|^γ·cos, |Y|^γ·sin), o mesmo valor do
+    produto complexo. Uma função só, para o torch.compile fundir forward e backward."""
+    p = a.clamp_min(_EPS).pow(gamma)
+    T = a.shape[-1]
     den = w.sum(-1).clamp_min(1.0 / T) * T  # Σ bins mantidos × T (≥ 1, como o clamp da referência)
     mag = ((p - s_abs) ** 2).sum(-1)
     cpx = ((p * torch.cos(phi) - s_c[..., 0]) ** 2 + (p * torch.sin(phi) - s_c[..., 1]) ** 2).sum(-1)
@@ -91,15 +80,16 @@ def multires_mr_os(est: Tensor, tgt: Tensor, max_freq, n1: Tensor, *, n_ffts, ga
     mr = torch.zeros((), device=est.device, dtype=est.dtype)
     os_ = torch.zeros((), device=est.device, dtype=est.dtype)
     fn = _RES_TERMS["fn"]
+    angle = _angle()
     for n_fft in n_ffts:
-        yr = torch.view_as_real(_stft(est, n_fft))
+        y = _stft(est, n_fft)
         with torch.no_grad():
             s = _stft(tgt, n_fft)
             s_abs = s.abs().clamp_min(_EPS).pow(gamma)
             s_c = torch.view_as_real(s_abs * torch.exp(1j * torch.atan2(s.imag, s.real)))
         w = bin_weights(max_freq, n_fft, B, sr, est.device)
         fw, fmask = formant_weights_cached(n_fft, sr, est.device, formant_weight=formant_weight)
-        mag, cpx, per = fn(yr, s_abs, s_c, w, fw, fmask, gamma, extra_formant_penalty)
+        mag, cpx, per = fn(y.abs(), angle.apply(y), s_abs, s_c, w, fw, fmask, gamma, extra_formant_penalty)
         mr = mr + mag.mean() * factor + cpx.mean() * factor_complex
         os_ = os_ + per.mean() + (per * n1).sum() / B
     return mr, os_ / len(n_ffts) * os_factor

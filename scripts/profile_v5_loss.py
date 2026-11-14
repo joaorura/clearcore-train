@@ -218,7 +218,11 @@ def main():
             fwd = tp._forward_v5(model, b, p_amp)
             leaves = list(fwd[:4])
             pr = tp.step_v5_ref(Frozen(model, fwd[:4]), istft, params, hp, b, a, p_amp)
-            pr2 = tp.step_v5_ref(Frozen(model, fwd[:4]), istft, params, hp, b, a, p_amp)
+            perm = torch.arange(b["spec"].shape[0] - 1, -1, -1, device=device)
+            bp = {k: (v[perm] if torch.is_tensor(v) and v.ndim and v.shape[0] == perm.numel() else v)
+                  for k, v in b.items()}
+            fwd_p = tp._forward_v5(model, bp, p_amp)
+            pr2 = tp.step_v5_ref(Frozen(model, fwd_p[:4]), istft, params, hp, bp, a, p_amp)
             pf = tp.step_v5(model, istft, params, hp, b, a, p_amp, _fwd=fwd)
             for k in ("total",) + LOSS_KEYS + ("g_turn_db", "g_turn_early_db", "g_n0_db", "zero_frac_only_interf",
                                                "zero_frac_target"):
@@ -228,14 +232,14 @@ def main():
             for k in ("total",) + LOSS_KEYS:
                 def g(parts, wrt):
                     return torch.autograd.grad(parts[k], wrt, retain_graph=True, allow_unused=True)
-                for tag, wrt in (("params", trainable), ("outs", leaves)):
-                    gr = g(pr, wrt)
-                    worst[f"grad_{tag}:{k}"] = max(worst[f"grad_{tag}:{k}"], cmp(g(pf, wrt), gr))
-                    worst[f"noise_{tag}:{k}"] = max(worst[f"noise_{tag}:{k}"], cmp(g(pr2, wrt), gr))
-            del fwd, leaves, pr, pr2, pf
+                gr = g(pr, trainable)
+                worst[f"grad_params:{k}"] = max(worst[f"grad_params:{k}"], cmp(g(pf, trainable), gr))
+                worst[f"floor_params_perm:{k}"] = max(worst[f"floor_params_perm:{k}"], cmp(g(pr2, trainable), gr))
+                worst[f"grad_outs:{k}"] = max(worst[f"grad_outs:{k}"], cmp(g(pf, leaves), g(pr, leaves)))
+            del fwd, fwd_p, leaves, pr, pr2, pf
             torch.cuda.empty_cache()
         report["parity"].append({"amp": bool(p_amp), **worst})
-        print(f"paridade amp={p_amp} (máx. sobre {len(batches)} lotes; rel. L2; noise = ref vs ref):",
+        print(f"paridade amp={p_amp} (máx. sobre {len(batches)} lotes; rel. L2; floor_perm = ref vs ref com o lote em ordem inversa):",
               json.dumps(worst, indent=0))
     torch.use_deterministic_algorithms(False)
     torch.backends.cudnn.deterministic, torch.backends.cudnn.benchmark = prev
@@ -258,20 +262,28 @@ def main():
         for p_ in trainable:
             p_.grad = None
 
-    for impl in ("ref", "fast"):
+    impls = ("ref", "fast", "fast+compile")
+
+    def use(impl):
+        tp.fv5.set_compile(impl == "fast+compile")
+        return "ref" if impl == "ref" else "fast"
+
+    for impl in impls:
+        kind = use(impl)
         tm = Timer()
         for it in range(o.warm + o.iters):
             for b in batches:
                 if it == o.warm and b is batches[0]:
                     tm.ms.clear()
                 torch.cuda.synchronize()
-                full(impl, b, tm)
+                full(kind, b, tm)
         report["step_ms"][impl] = {k: statistics.median(v) for k, v in tm.ms.items() if k != "step"}
         report["step_ms"][impl]["sum"] = sum(report["step_ms"][impl].values())
     print("passo:", json.dumps(report["step_ms"], indent=1))
 
     # --- por perda: forward da seção e backward isolado até as saídas do modelo ------------------------------------
-    for impl in ("ref", "fast"):
+    for impl in ("ref", "fast"):  # o grafo compilado não admite retain_graph (buffers doados): só no passo inteiro
+        kind = use(impl)
         tf, tb = Timer(), Timer()
         for it in range(o.warm + o.iters):
             for b in batches:
@@ -279,10 +291,11 @@ def main():
                     tf.ms.clear()
                     tb.ms.clear()
                 fwd = tp._forward_v5(model, b, amp)
-                leaves = [t for t in fwd[:4]]
+                leaves = [t.detach().requires_grad_(True) for t in fwd[:4]]  # sem o grafo do modelo (memória)
+                fwd = (*leaves, fwd[4])
                 torch.cuda.synchronize()
                 tf.start()
-                if impl == "ref":
+                if kind == "ref":
                     parts = ref_sections(model, istft, params, hp, b, a, amp, tf, fwd)
                 else:
                     parts = tp.step_v5(model, istft, params, hp, b, a, amp, timer=tf, _fwd=fwd)
