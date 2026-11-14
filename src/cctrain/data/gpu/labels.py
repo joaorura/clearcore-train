@@ -21,18 +21,18 @@ SILENCE_MS = 1e-7  # = mix_v4.SILENCE_MS
 _EPS = 1e-20
 
 
-def _frames(x: torch.Tensor, n_frames: int) -> torch.Tensor:
-    """`[M, n]` -> `[M, F, HOP]` em float64 (como `x[: F*HOP].reshape(F, HOP)` do CPU)."""
-    return x[:, : n_frames * HOP].to(torch.float64).reshape(x.shape[0], n_frames, HOP)
+def _frames(x: torch.Tensor, n_frames: int, dtype: torch.dtype = torch.float64) -> torch.Tensor:
+    """`[M, n]` -> `[M, F, HOP]` em `dtype` (float64 = paridade; como `x[: F*HOP].reshape(F, HOP)` do CPU)."""
+    return x[:, : n_frames * HOP].to(dtype).reshape(x.shape[0], n_frames, HOP)
 
 
-def _frame_ms(x: torch.Tensor, n_frames: int) -> torch.Tensor:
-    return torch.mean(_frames(x, n_frames) ** 2, dim=2)
+def _frame_ms(x: torch.Tensor, n_frames: int, dtype: torch.dtype = torch.float64) -> torch.Tensor:
+    return torch.mean(_frames(x, n_frames, dtype) ** 2, dim=2)
 
 
-def frame_levels(x: torch.Tensor, n_frames: int) -> torch.Tensor:
+def frame_levels(x: torch.Tensor, n_frames: int, dtype: torch.dtype = torch.float64) -> torch.Tensor:
     """Nível por quadro em dB (potência média + 1e-20): `f64[M, F]`."""
-    return 10 * torch.log10(_frame_ms(x, n_frames) + _EPS)
+    return 10 * torch.log10(_frame_ms(x, n_frames, dtype) + _EPS)
 
 
 def _active_from_levels(lv: torch.Tensor, range_db: float, floor_dbfs: float) -> torch.Tensor:
@@ -41,14 +41,15 @@ def _active_from_levels(lv: torch.Tensor, range_db: float, floor_dbfs: float) ->
     return (lv >= thr) & (mx > floor_dbfs)
 
 
-def rel_activity(x: torch.Tensor, n_frames: int, range_db: float = 30.0, floor_dbfs: float = -75.0) -> torch.Tensor:
+def rel_activity(x: torch.Tensor, n_frames: int, range_db: float = 30.0, floor_dbfs: float = -75.0,
+                 dtype: torch.dtype = torch.float64) -> torch.Tensor:
     """VAD relativo por trilha: `bool[M, F]`. Funciona igual com `range_db=45.0` (interf_active_wet45)."""
-    return _active_from_levels(frame_levels(x, n_frames), range_db, floor_dbfs)
+    return _active_from_levels(frame_levels(x, n_frames, dtype), range_db, floor_dbfs)
 
 
-def active_rms_db(x: torch.Tensor, n_frames: int) -> torch.Tensor:
+def active_rms_db(x: torch.Tensor, n_frames: int, dtype: torch.dtype = torch.float64) -> torch.Tensor:
     """RMS (dB) nos quadros ativos (`floor=-200`); -200 se nenhum quadro ativo: `f64[M]`."""
-    ms = _frame_ms(x, n_frames)
+    ms = _frame_ms(x, n_frames, dtype)
     lv = 10 * torch.log10(ms + _EPS)
     act = _active_from_levels(lv, 30.0, -200.0)
     cnt = act.sum(dim=1)
@@ -57,6 +58,6 @@ def active_rms_db(x: torch.Tensor, n_frames: int) -> torch.Tensor:
     return torch.where(cnt > 0, out, torch.full_like(out, -200.0))
 
 
-def digital_silence(noisy32: torch.Tensor, n_frames: int) -> torch.Tensor:
+def digital_silence(noisy32: torch.Tensor, n_frames: int, dtype: torch.dtype = torch.float64) -> torch.Tensor:
     """Quadros de silêncio digital: média por quadro de `noisy32**2` em float64 < 1e-7: `bool[B, F]`."""
-    return _frame_ms(noisy32, n_frames) < SILENCE_MS
+    return _frame_ms(noisy32, n_frames, dtype) < SILENCE_MS

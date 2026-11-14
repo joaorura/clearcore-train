@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import functools
 import json
 import math
 import os
@@ -77,6 +78,7 @@ from cctrain.train.stage_f import HOP, StageFHParams, prepare_student  # noqa: E
 from cctrain.data.mix_v4 import N_PROBS, PATTERN_PROBS, V4Params  # noqa: E402
 from cctrain.data.workers import init_worker  # noqa: E402
 from cctrain.data.gpu.mixer import GpuMixer  # noqa: E402
+from cctrain.data.gpu.prefetch import MixPrefetcher  # noqa: E402
 from cctrain.data.gpu.recipe import StageV4RecipeDataset, collate_recipes  # noqa: E402
 
 ensure_df_importable()
@@ -188,6 +190,14 @@ def parse_args(argv=None):
                    help="perdas: fast = sem recomputação/sincronização (mesma matemática, fora do hash); ref = a antiga")
     p.add_argument("--loss-compile", action="store_true",
                    help="torch.compile nos termos por resolução de L_mr/L_os (só com --loss-impl fast)")
+    p.add_argument("--gpu-mix-dtype", choices=("f64", "f32"), default="f64",
+                   help="--gpu-mix: dtype dos sinais da mistura (f64 = paridade bit a bit com o CPU; f32 ~1e-6 do pico, "
+                        "rótulos idênticos; validado por scripts/gpu_mix_equiv.py)")
+    p.add_argument("--gpu-mix-overlap", action="store_true",
+                   help="--gpu-mix: copia (H2D) e mistura o lote k+1 numa CUDA stream/thread separada enquanto o passo k "
+                        "roda (cctrain.data.gpu.prefetch); lotes idênticos, só esconde a latência")
+    p.add_argument("--gpu-mix-wire", choices=("dense", "sparse"), default="dense",
+                   help="--gpu-mix: trilhas secas no H2D; sparse manda só os quadros ligados (exato, ~25%% menos bytes)")
     return p.parse_args(argv)
 
 
@@ -669,13 +679,13 @@ def main():
         ds = StageV4RecipeDataset(ds.pools, ds.bank, ds.data_root, vp)
         if a.profile_drop_mode == "batch":
             ds.drop_block = bl
-        mixer = GpuMixer.from_dataset(ds, device)
+        mixer = GpuMixer.from_dataset(ds, device, dtype=torch.float32 if a.gpu_mix_dtype == "f32" else torch.float64)
         if is0:
             log(f"--gpu-mix: receitas nos workers, mistura/rótulos/features em {device}")
     dl = DataLoader(ds, batch_size=bl, sampler=sampler, num_workers=workers,
                     prefetch_factor=a.prefetch if workers else None, persistent_workers=workers > 0,
                     pin_memory=device.startswith("cuda"), worker_init_fn=init_worker,
-                    collate_fn=collate_recipes if mixer else None)
+                    collate_fn=functools.partial(collate_recipes, sparse=a.gpu_mix_wire == "sparse") if mixer else None)
     n_refill = 0
     n_skipped = 0
     data_tag = DATA_TAG + (f" + {GPU_MIX_TAG}" if mixer else "")
@@ -761,7 +771,8 @@ def main():
         pend_wait.clear()
         return why
 
-    it = iter(dl)
+    overlap = mixer is not None and a.gpu_mix_overlap and device.startswith("cuda")
+    it = MixPrefetcher(iter(dl), mixer, ds, device) if overlap else iter(dl)
     while step < end_step:
         tw = time.perf_counter()
         try:
@@ -773,8 +784,14 @@ def main():
         if fast:  # estado de perfil do lote, sabido no host (receita/CPU) sem ler a GPU
             from cctrain.train.v5_fast import batch_profile_state
 
-            on = batch_profile_state(batch["mask0"] if mixer is not None else batch["mask"].reshape(-1) <= 0)
-        if mixer is not None:  # a mistura na GPU conta como espera por dados
+            if overlap:  # lote já misturado (sem mask0): lê o mask na GPU (um sync)
+                on = batch_profile_state(batch[0]["mask"].reshape(-1) <= 0)
+            else:
+                on = batch_profile_state(batch["mask0"] if mixer is not None else batch["mask"].reshape(-1) <= 0)
+        if overlap:  # já misturado na stream lateral; a espera é só o que faltou da mistura
+            batch, nr = batch
+            n_refill += nr
+        elif mixer is not None:  # a mistura na GPU conta como espera por dados
             batch = mixer(batch)
             n_refill += mixer.fill_invalid(batch, ds)
             batch.pop("valid")
@@ -927,6 +944,8 @@ def main():
                    "compile_mode": a.compile_mode,
                    "grad_scale": scaler.get_scale() if scaler.is_enabled() else None,
                    "drop_mode": a.profile_drop_mode, "lora_gru_fused": a.lora_gru_fused, "skipped_off_batches": n_skipped, "data": data_tag, "gpu_mix_cpu_refills": n_refill if mixer else None,
+                   "gpu_mix_dtype": a.gpu_mix_dtype if mixer else None, "gpu_mix_overlap": overlap,
+                   "gpu_mix_wire": a.gpu_mix_wire if mixer else None,
                    "s_per_step_median": statistics.median(step_times) if step_times else None,
                    "loader_wait_median": statistics.median(waits) if waits else None,
                    "samples_per_s": (a.global_batch / (statistics.median(step_times) + statistics.median(waits)))
@@ -937,6 +956,8 @@ def main():
         (run_dir / "TRAIN_DONE").write_text(f"{stop_reason} passo {step} {time.strftime('%F %T')}\n")
         log(f"fim: {stop_reason} no passo {step}; resumo em {run_dir / 'summary.json'}")
         lf.close()
+    if overlap:
+        it.close()
     if world > 1:
         dist.barrier()
         dist.destroy_process_group()

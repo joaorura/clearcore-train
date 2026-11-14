@@ -152,11 +152,37 @@ _STACK = ("index", "on", "rir_idx", "reverb", "sirs", "rels", "n_interf", "has_t
           "noise_val", "lp_cut", "floor_pink", "mask0", "embedding", "max_freq", "pattern", "phase", "attempt")
 
 
-def collate_recipes(items: list[dict]) -> dict:
-    """Lote compacto: só as trilhas presentes (`dry[M, n]` + `track_b`/`track_k`), ruído só das amostras com SNR e
+def _pack_dry(items: list[dict], dry: np.ndarray) -> dict:
+    """Só os quadros que a trilha usa (turno ligado, dilatado ±1 quadro pela rampa de 10 ms): `dry_packed[P, HOP]`
+    f32 + `dry_m`/`dry_f` (linha da trilha / quadro de cada bloco). Sem perda: fora desses quadros o envelope é
+    exatamente 0 e `dry * env` = 0, igual ao denso. Requer n múltiplo de HOP (o chamador cai no denso senão)."""
+    frames = items[0]["on"].shape[1]
+    ms, fs, blocks, m0 = [], [], [], 0
+    for it in items:
+        for j, k in enumerate(it["track_k"]):
+            on = it["on"][int(k)]
+            act = on.copy()
+            act[1:] |= on[:-1]
+            act[:-1] |= on[1:]
+            f = np.nonzero(act)[0]
+            blocks.append(dry[m0 + j].reshape(frames, HOP)[f])
+            ms.append(np.full(len(f), m0 + j, np.int64))
+            fs.append(f.astype(np.int64))
+        m0 += len(it["track_k"])
+    return {"dry_packed": torch.from_numpy(np.concatenate(blocks)), "dry_m": torch.from_numpy(np.concatenate(ms)),
+            "dry_f": torch.from_numpy(np.concatenate(fs)), "dry_shape": torch.tensor(dry.shape)}
+
+
+def collate_recipes(items: list[dict], sparse: bool = False) -> dict:
+    """`sparse=True` manda só os quadros ligados das trilhas secas (`_pack_dry`; exato, a rig tem PCIe x1) e o
+    `GpuMixer` os reexpande na GPU. Lote compacto: só as trilhas presentes (`dry[M, n]` + `track_b`/`track_k`), ruído só das amostras com SNR e
     branco do piso só das silenciosas (≈3,5 MB/amostra em 6 s, contra 8 MB com tudo preenchido)."""
     out: dict = {k: torch.from_numpy(np.stack([np.asarray(it[k]) for it in items])) for k in _STACK}
-    out["dry"] = torch.from_numpy(np.concatenate([it["dry"] for it in items]))
+    dry = np.concatenate([it["dry"] for it in items])
+    if sparse and dry.shape[1] % HOP == 0:
+        out.update(_pack_dry(items, dry))
+    else:
+        out["dry"] = torch.from_numpy(dry)
     out["track_b"] = torch.cat([torch.full((len(it["track_k"]),), b, dtype=torch.long) for b, it in enumerate(items)])
     out["track_k"] = torch.from_numpy(np.concatenate([it["track_k"] for it in items]))
     for key, flag in (("noise", lambda it: len(it["noise"]) > 0), ("floor_white", lambda it: len(it["floor_white"]) > 0)):

@@ -61,7 +61,7 @@ def _stats(ref_db, g, lim, noise, frames):
     return lvl, (lvl - 10 * np.log10(p) if p > 0 else np.nan)
 
 
-def run(ds: StageV4RecipeDataset, mixer: GpuMixer, idx: list[int], batch: int) -> dict:
+def run(ds: StageV4RecipeDataset, mixer: GpuMixer, idx: list[int], batch: int, wire: str = "dense") -> dict:
     worst_a = {k: 0.0 for k in AUDIO}
     worst_r = {k: 0.0 for k in AUDIO}
     worst_f = {k: 0.0 for k in FEATS}
@@ -73,7 +73,7 @@ def run(ds: StageV4RecipeDataset, mixer: GpuMixer, idx: list[int], batch: int) -
     lv_cpu, snr_cpu = [], []
     for s in range(0, len(idx), batch):
         ids = idx[s : s + batch]
-        rb = collate_recipes([ds[i] for i in ids])
+        rb = collate_recipes([ds[i] for i in ids], sparse=wire == "sparse")
         out = mixer(rb, debug=True)
         invalid += int((~out["valid"]).sum())
         dbg = {k: (v.cpu().numpy() if torch.is_tensor(v) else v) for k, v in out["debug"].items()}
@@ -128,7 +128,13 @@ def run(ds: StageV4RecipeDataset, mixer: GpuMixer, idx: list[int], batch: int) -
     }
 
 
-def make(device: str, **kw):
+def mixer_kwargs(dtype: str = "f64", lp_dtype: str | None = None, label_dtype: str | None = None) -> dict:
+    d = {"f64": torch.float64, "f32": torch.float32}
+    return {"dtype": d[dtype], "lp_dtype": d[lp_dtype] if lp_dtype else None,
+            "label_dtype": d[label_dtype] if label_dtype else None}
+
+
+def make(device: str, mixer_kw: dict | None = None, **kw):
     import train_pro_v42 as T
 
     from cctrain.paths import Paths
@@ -138,7 +144,7 @@ def make(device: str, **kw):
     vp = T.v42_params(a)
     base, pl = T.make_dataset(paths, vp)
     ds = StageV4RecipeDataset(base.pools, base.bank, base.data_root, vp)
-    return ds, GpuMixer.from_dataset(ds, device), a
+    return ds, GpuMixer.from_dataset(ds, device, **(mixer_kw or {})), a
 
 
 def main():
@@ -148,9 +154,13 @@ def main():
     ap.add_argument("--batch", type=int, default=12)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--json", default=None)
+    ap.add_argument("--wire", choices=("dense", "sparse"), default="dense", help="trilhas secas no H2D: denso ou só quadros ligados")
+    ap.add_argument("--dtype", choices=("f64", "f32"), default="f64")
+    ap.add_argument("--lp-dtype", choices=("f64", "f32"), default=None, help="passa-baixa IIR do ruído (padrão: --dtype)")
+    ap.add_argument("--label-dtype", choices=("f64", "f32"), default=None, help="níveis/rótulos (padrão: --dtype)")
     a = ap.parse_args()
-    ds, mixer, _ = make(a.device, batch_size=a.batch)
-    res = run(ds, mixer, list(range(a.start, a.start + a.n)), a.batch)
+    ds, mixer, _ = make(a.device, mixer_kwargs(a.dtype, a.lp_dtype, a.label_dtype), batch_size=a.batch)
+    res = run(ds, mixer, list(range(a.start, a.start + a.n)), a.batch, a.wire)
     txt = json.dumps(res, indent=1, default=float)
     print(txt)
     if a.json:
