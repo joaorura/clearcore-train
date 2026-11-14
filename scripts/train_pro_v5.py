@@ -168,8 +168,10 @@ def parse_args(argv=None):
     p.add_argument("--gpu-pool-refresh-pct-per-min", type=float, default=0.0,
                    help="--gpu-pool-gb: %% das posições do pool trocadas por minuto em segundo plano (0 = pool fixo)")
     p.add_argument("--gpu-pool-codec", choices=("exact", "int16"), default="exact",
-                   help="--gpu-pool-gb: exact = int16 só quando sem perda, senão f32 (bit a bit); int16 = tudo int16 com "
-                        "escala por clipe (≈2× mais horas, erro ≤ meio passo nos clipes MP3/reamostrados)")
+                   help="--gpu-pool-gb: exact = int16 só quando sem perda (PCM16 a 48 kHz), senão f32 (bit a bit com o "
+                        "--gpu-mix); int16 = tudo int16 com escala por clipe (~1,8x mais horas; erro ≤ 1,5e-5 do pico do "
+                        "clipe, mas NÃO equivalente por amostra: o ganho de nível chega a ~200x e um quadro ativo que muda "
+                        "de lado no limiar desloca o ganho; medido até 0,37 do pico na mistura)")
     p.add_argument("--gpu-pool-delay", type=int, default=0,
                    help="--gpu-pool-gb: lotes de quarentena de um slot trocado (0 = 2·workers·prefetch + 16)")
     return p.parse_args(argv)

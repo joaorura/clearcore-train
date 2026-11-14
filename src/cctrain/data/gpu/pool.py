@@ -8,7 +8,10 @@ a GPU recorta, converte e segue o `GpuMixer`.
 Formato no pool (`codec`):
   * "exact" (padrão): int16 quando a conversão é sem perda (x·32768 inteiro, o caso de FLAC/WAV PCM 16 bits já a
     48 kHz), senão float32 (MP3 decodificado, fontes reamostradas pelo soxr). O áudio da GPU é bit a bit o do CPU.
-  * "int16": tudo em int16; o que não é sem perda leva escala por clipe (pico/32767), erro ≤ meio passo da escala.
+  * "int16": tudo em int16; o que não é sem perda leva escala por clipe (pico/32767), erro ≤ meio passo da escala
+    (≤ 1,5e-5 do pico do clipe). ~1,8x mais horas no mesmo orçamento, mas não é equivalente amostra a amostra: o
+    ganho de nível do mix_v4 chega a ~200x e um quadro que cruza o limiar de atividade muda o nível ativo (medido:
+    até 0,37 do pico em 96 misturas; rótulos 0,002% dos quadros). Fica como opção estatística, não como padrão.
 
 Amostragem sem viés (ver `PoolIndex`): os grupos são (falante, faixa de banda) e o ruído. Cada grupo `g` com `N_g`
 clipes no manifest mantém `k_g` (1 ≤ k_g ≤ N_g) clipes no pool, um subconjunto uniforme; a renovação troca um membro
